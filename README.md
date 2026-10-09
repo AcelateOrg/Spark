@@ -20,6 +20,7 @@
 </p>
 
 ---
+> Warning: SPARK is in active development. There are a lot of bugs that can break your game! We provide the engine "as-is".
 
 ## Why
 
