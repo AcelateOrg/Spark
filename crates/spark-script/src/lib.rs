@@ -188,7 +188,8 @@ impl ScriptGame {
         let limit = self.timeout;
         lua.set_interrupt(move |_| {
             if deadline.get().is_some_and(|d| Instant::now() > d) {
-                deadline.set(None); // report once; the error unwinds the callback
+                // The deadline stays set: a `pcall` around the loop cannot swallow the error, every
+                // later check fails too until the callback returns (`run` then clears it).
                 return Err(mlua::Error::runtime(format!(
                     "script ran for more than {:.1} s without returning (infinite loop?). \
                      Long work: split it over frames with wait() / task.spawn",

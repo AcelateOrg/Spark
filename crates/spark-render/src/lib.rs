@@ -234,7 +234,6 @@ struct SurfaceState {
 
 type SurfaceFactory = Box<dyn Fn(&wgpu::Instance) -> Option<wgpu::Surface<'static>>>;
 
-
 /// Draws a [`World`] to a window or to an image.
 pub struct Renderer {
     instance: wgpu::Instance,
@@ -623,7 +622,7 @@ impl Renderer {
         let shadow_dummy = shadow_map(&device, 1);
         let frame_bind_group = frame_bind_group(&device, &frame_layout, &frame_buffer, &shadow_dummy.view, &shadow_sampler);
 
-        // Objects are tightly packed (storage buffer, instanced draws).
+        // Per-object uniforms, read in 64-object windows (dynamic offsets) by instanced draws.
         let object_align = device.limits().min_uniform_buffer_offset_alignment as u64;
         let object_capacity = 64 * 1024;
         let (object_buffer, object_bind_group) = object_buffer(&device, &object_layout, object_capacity);

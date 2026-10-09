@@ -455,9 +455,10 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn uri_sandbox() {
-        use super::{percent_decode, safe_relative};
         assert_eq!(safe_relative("textures/a.png").unwrap(), std::path::PathBuf::from("textures/a.png"));
         assert_eq!(safe_relative("./x/../b.bin").unwrap(), std::path::PathBuf::from("b.bin"));
         for bad in ["../secret.txt", "/etc/passwd", "C:/Windows/win.ini", "a/../../b", "http://x/y.png", "\\\\server\\share", ""] {
@@ -465,8 +466,6 @@ mod tests {
         }
         assert_eq!(percent_decode("a%20b%20"), "a b ");
     }
-
-    use super::*;
 
     #[test]
     fn base64() {

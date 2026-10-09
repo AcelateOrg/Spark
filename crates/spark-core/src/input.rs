@@ -523,9 +523,10 @@ impl Input {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn fixed_steps_see_each_press_once() {
-        use super::*;
         let mut i = Input::default();
         // Frame 1: key pressed, no fixed step this frame (high refresh rate).
         i.key_event(Key::Space, true);
@@ -552,8 +553,6 @@ mod tests {
         assert!(!i.pressed(Key::Space));
         i.end_fixed_steps();
     }
-
-    use super::*;
 
     #[test]
     fn key_names_round_trip_and_aliases() {

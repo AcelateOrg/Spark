@@ -1,4 +1,4 @@
-// Sun shadow map: depth only. Uses the same per-object storage buffer as the scene pass.
+// Sun shadow map: depth only. Reads the same per-object uniform windows as the scene pass.
 struct Object {
     model: mat4x4<f32>,
     normal_matrix: mat4x4<f32>,

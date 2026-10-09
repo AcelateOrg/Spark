@@ -58,13 +58,19 @@ fn render_api_contract() {
 
 #[test]
 fn infinite_loop_is_stopped() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scripts/infinite_loop.luau");
+    for script in ["infinite_loop.luau", "pcall_loop.luau"] {
+        stopped(script);
+    }
+}
+
+fn stopped(script: &str) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scripts").join(script);
     let mut game = ScriptGame::new(path).hot_reload(false).timeout(Some(std::time::Duration::from_millis(200)));
     let mut world = World::new();
     game.start(&mut world);
     let t = std::time::Instant::now();
     run_frame(&mut game, &mut world, 1.0 / 60.0);
     let e = game.error().expect("the loop must be stopped with an error");
-    assert!(e.contains("infinite loop"), "{e}");
+    assert!(e.contains("infinite loop"), "{script}: {e}");
     assert!(t.elapsed() < std::time::Duration::from_secs(5));
 }

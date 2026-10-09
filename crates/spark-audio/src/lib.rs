@@ -18,10 +18,10 @@ use kira::track::{TrackBuilder, TrackHandle};
 use kira::{AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Panning, PlaybackRate, Tween};
 use spark_core::{AudioBackend, AudioCommand, BusId, PlayParams, SoundId};
 
-/// Linear volume (0..) to decibels.
 /// Distinct decoded sound files kept in memory before the cache is flushed.
 const MAX_CACHED_SOUNDS: usize = 256;
 
+/// Linear volume (0..) to decibels.
 fn db(volume: f32) -> Decibels {
     if volume <= 0.001 { Decibels::SILENCE } else { Decibels((20.0 * volume.log10()).max(-60.0)) }
 }
