@@ -92,6 +92,7 @@ impl World {
         self.physics.gravity = Physics::default().gravity;
         self.physics.enabled = true;
         self.audio.stop_all(0.0);
+        self.audio.clear_cache();
         self.assets.clear();
         self.animator.clear();
         self.render = RenderSettings::default();

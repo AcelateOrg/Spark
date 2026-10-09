@@ -226,6 +226,20 @@ impl UserData for LuaRender {
             let f = to_filter(&v, "graphics.upscale")?;
             with(lua, |w| Ok(w.render.upscale = f))
         });
+        f.add_field_method_get("msaa", |lua, _| with(lua, |w| Ok(w.render.msaa)));
+        f.add_field_method_set("msaa", |lua, _, v: Value| {
+            let n = match v {
+                Value::Boolean(b) => if b { 4 } else { 1 },
+                _ => to_num(&v, "graphics.msaa")?.clamp(1.0, 8.0) as u32,
+            };
+            with(lua, |w| Ok(w.render.msaa = n))
+        });
+        f.add_field_method_get("shadows", |lua, _| with(lua, |w| Ok(w.render.shadows)));
+        f.add_field_method_set("shadows", |lua, _, v: bool| with(lua, |w| Ok(w.render.shadows = v)));
+        f.add_field_method_get("shadow_distance", |lua, _| with(lua, |w| Ok(w.render.shadow_distance)));
+        f.add_field_method_set("shadow_distance", |lua, _, v: f32| with(lua, |w| Ok(w.render.shadow_distance = v.max(1.0))));
+        f.add_field_method_get("shadow_size", |lua, _| with(lua, |w| Ok(w.render.shadow_size)));
+        f.add_field_method_set("shadow_size", |lua, _, v: f32| with(lua, |w| Ok(w.render.shadow_size = v.clamp(256.0, 8192.0) as u32)));
         f.add_field_method_get("filter", |lua, _| with(lua, |w| Ok(filter_name(w.render.filter))));
         f.add_field_method_set("filter", |lua, _, v: Value| {
             let f = to_filter(&v, "graphics.filter")?;

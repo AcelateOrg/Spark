@@ -53,6 +53,7 @@ frame.time          // seconds, dt, real seconds (ignores time.scale), frame num
 frame.sun_dir.xyz, frame.sun_color.rgb, frame.ambient.rgb   // linear
 frame.fog_color.rgb, frame.fog                              // fog: near, far, enabled
 frame.light_count.x, frame.lights[i]                        // Light { position(xyz, w=range), color(rgb, w=1 spot), direction(xyz, w=cos outer), params(x=cos inner) }
+frame.shadow_view_proj, frame.shadow                        // sun shadow map: world -> shadow clip; enabled, 1/size, normal offset, distance
 params                                                      // your struct Params
 texture1, texture2, linear_sampler, nearest_sampler
 linear_to_srgb(rgb), srgb_to_linear(rgb)
@@ -70,13 +71,21 @@ struct Fragment {
     normal: vec3<f32>,     // world space, not normalized
     uv: vec2<f32>,         // already multiplied by material tiling
     custom: vec4<f32>,     // free: pass anything from vertex to fragment
+    spark_instance: u32,   // engine-managed (instanced drawing): leave it alone
 }
 object.model, object.normal_matrix, object.color (linear), object.data, object.info (tiling x, tiling y, unlit 0/1)
 base_texture, base_sampler                 // material texture (white if none), sampled with graphics.filter
+// `object` is the object being drawn. Objects with the same mesh / material state are drawn in one
+// instanced draw call; that is invisible to shaders (always use `default_vertex` or start from
+// `var f: Fragment;` / `var f = default_vertex(v);` and return `f`, the engine fills spark_instance).
+// Shadows are cast with the plain mesh shape (custom vertex displacement does not move the shadow).
+// Materials with blend = "alpha" / "additive" are blended (return the alpha you want) and drawn after
+// opaque objects, back to front; they do not write depth and do not cast shadows.
 
 default_vertex(v) -> Fragment
 surface_color(uv) -> vec4<f32>             // object.color * base texture
-lighting(world_pos, normal) -> vec3<f32>   // ambient + sun + lights
+lighting(world_pos, normal) -> vec3<f32>   // ambient + sun (with shadows) + lights
+sun_shadow(world_pos, normal) -> f32       // 1 = lit, 0 = in the sun's shadow (PCF); 1 when shadows are off
 apply_fog(rgb, world_pos) -> vec3<f32>
 default_fragment(f) -> vec4<f32>
 ```

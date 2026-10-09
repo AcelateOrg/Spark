@@ -20,9 +20,20 @@ pub(crate) struct SavePath(pub Option<PathBuf>);
 struct Store {
     path: Option<PathBuf>,
     data: RefCell<Map<String, Json>>,
+    /// Changed since the last write. `save.set` in a loop costs one write per frame, not per call.
+    dirty: std::cell::Cell<bool>,
 }
 
-/// `%APPDATA%/SparkGames/<game>/save.json` (Windows) or `~/.local/share/SparkGames/<game>/save.json`.
+impl Drop for Store {
+    fn drop(&mut self) {
+        if let Err(e) = write_file(self) {
+            log::error!("{e}");
+        }
+    }
+}
+
+/// `%APPDATA%/SparkGames/<game>/save.json` (Windows), `~/Library/Application Support/SparkGames/<game>/save.json`
+/// (macOS) or `$XDG_DATA_HOME` / `~/.local/share/SparkGames/<game>/save.json` (Linux).
 pub fn default_save_path(game: &str) -> Option<PathBuf> {
     let clean: String = game
         .chars()
@@ -32,6 +43,8 @@ pub fn default_save_path(game: &str) -> Option<PathBuf> {
     let clean = if clean.is_empty() { "game".to_string() } else { clean };
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| Path::new(&h).join("Library/Application Support"))
     } else {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
@@ -45,21 +58,41 @@ fn load(path: &Path) -> Map<String, Json> {
     match serde_json::from_str::<Json>(&text) {
         Ok(Json::Object(m)) => m,
         _ => {
-            log::warn!("save file '{}' is damaged; starting fresh", path.display());
+            // Keep the damaged file for recovery instead of overwriting it with the next save.
+            let bak = path.with_extension("json.bak");
+            let _ = std::fs::rename(path, &bak);
+            log::warn!("save file '{}' is damaged; moved to '{}', starting fresh", path.display(), bak.display());
             Map::new()
         }
     }
 }
 
+/// Marks the store changed; the file is written by [`flush`] (end of frame) or on exit.
 fn persist(store: &Store) -> LuaResult<()> {
+    store.dirty.set(true);
+    Ok(())
+}
+
+/// Writes the save file if something changed (atomic: temp file + rename).
+pub(crate) fn flush(lua: &Lua) -> LuaResult<()> {
+    match lua.app_data_ref::<Store>() {
+        Some(s) => write_file(&s).map_err(rt),
+        None => Ok(()),
+    }
+}
+
+fn write_file(store: &Store) -> Result<(), String> {
+    if !store.dirty.replace(false) {
+        return Ok(());
+    }
     let Some(path) = &store.path else { return Ok(()) };
-    let text = serde_json::to_string_pretty(&*store.data.borrow()).map_err(rt)?;
+    let text = serde_json::to_string_pretty(&*store.data.borrow()).map_err(|e| e.to_string())?;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| rt(format!("save: cannot create '{}': {e}", dir.display())))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("save: cannot create '{}': {e}", dir.display()))?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text).map_err(|e| rt(format!("save: cannot write '{}': {e}", tmp.display())))?;
-    std::fs::rename(&tmp, path).map_err(|e| rt(format!("save: cannot write '{}': {e}", path.display())))
+    std::fs::write(&tmp, text).map_err(|e| format!("save: cannot write '{}': {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("save: cannot write '{}': {e}", path.display()))
 }
 
 fn to_json(v: &Value, what: &str, depth: u32) -> LuaResult<Json> {
@@ -157,7 +190,7 @@ fn store(lua: &Lua) -> LuaResult<mlua::AppDataRef<'_, Store>> {
 pub(crate) fn install(lua: &Lua, g: &Table) -> LuaResult<()> {
     let path = lua.app_data_ref::<SavePath>().map(|p| p.0.clone()).unwrap_or_default();
     let data = path.as_deref().map(load).unwrap_or_default();
-    lua.set_app_data(Store { path, data: RefCell::new(data) });
+    lua.set_app_data(Store { path, data: RefCell::new(data), dirty: Default::default() });
 
     let save = lua.create_table()?;
     save.set(
@@ -184,6 +217,7 @@ pub(crate) fn install(lua: &Lua, g: &Table) -> LuaResult<()> {
             persist(&s)
         })?,
     )?;
+    save.set("flush", lua.create_function(|lua, ()| flush(lua))?)?;
     save.set("has", lua.create_function(|lua, key: String| Ok(store(lua)?.data.borrow().contains_key(&key)))?)?;
     save.set(
         "delete",

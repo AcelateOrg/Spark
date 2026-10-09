@@ -80,6 +80,8 @@ type LightSpec = {
     name: string?,
 }
 
+type BlendMode = "auto" | "opaque" | "alpha" | "additive"
+
 type SpawnProps = {
     name: string?,
     position: vector?,
@@ -92,6 +94,9 @@ type SpawnProps = {
     light: LightSpec?,
     shader: Shader?,
     data: { number }?,
+    blend: BlendMode?,
+    double_sided: boolean?,
+    cast_shadow: boolean?,
 }
 
 type Hit = { object: Object, point: vector, normal: vector, distance: number }
@@ -149,6 +154,12 @@ declare extern type Material with
     function tiling(self, x: number, y: number?): Material
     function with_color(self, color: ColorLike): Material
     function with_unlit(self, on: boolean?): Material
+    function with_blend(self, mode: BlendMode): Material
+    function with_double_sided(self, on: boolean?): Material
+    function with_cast_shadow(self, on: boolean?): Material
+    blend: BlendMode
+    double_sided: boolean
+    cast_shadow: boolean
     function with_shader(self, shader: Shader?): Material
     function with_data(self, a: number, b: number?, c: number?, d: number?): Material
 end
@@ -238,6 +249,9 @@ declare extern type Object with
     rotation: vector
     scale: vector
     visible: boolean
+    blend: BlendMode
+    double_sided: boolean
+    cast_shadow: boolean
     color: Color
     material: Material?
     mesh: Mesh?
@@ -308,7 +322,10 @@ declare extern type Camera with
     fov: number
     near: number
     far: number
+    ortho: number?
     function look_at(self, target: vector | Object): ()
+    function world_to_screen(self, pos: vector | Object): (number?, number?, number?)
+    function screen_to_ray(self, x: number?, y: number?): (vector, vector)
     function translate(self, delta: vector): ()
     function forward(self): vector
     function right(self): vector
@@ -393,6 +410,10 @@ declare graphics: {
     scale: number,
     upscale: "linear" | "nearest",
     filter: "linear" | "nearest",
+    msaa: number,
+    shadows: boolean,
+    shadow_distance: number,
+    shadow_size: number,
     scene_width: number,
     scene_height: number,
     shader: Shader?,
@@ -522,6 +543,7 @@ declare save: {
     delete: (key: string) -> (),
     clear: () -> (),
     keys: () -> { string },
+    flush: () -> (),
     path: () -> string?,
 }
 

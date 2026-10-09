@@ -4,6 +4,41 @@ use crate::assets::TextureId;
 use crate::color::Color;
 use crate::shader::ShaderId;
 
+/// How a material is combined with what is behind it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BlendMode {
+    /// `Alpha` when `color.a < 1`, otherwise `Opaque`.
+    #[default]
+    Auto,
+    /// Solid; pixels with alpha < 0.01 are cut out (foliage, fences).
+    Opaque,
+    /// See-through (glass, water, fading objects). Drawn after opaque objects, back to front.
+    Alpha,
+    /// Adds light (fire, lasers, glow). Drawn with the transparent objects.
+    Additive,
+}
+
+impl BlendMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(Self::Auto),
+            "opaque" => Some(Self::Opaque),
+            "alpha" | "transparent" => Some(Self::Alpha),
+            "additive" | "add" => Some(Self::Additive),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Opaque => "opaque",
+            Self::Alpha => "alpha",
+            Self::Additive => "additive",
+        }
+    }
+}
+
 /// How a mesh looks. Lit by the sun + ambient unless `unlit`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
@@ -18,11 +53,27 @@ pub struct Material {
     pub shader: Option<ShaderId>,
     /// Free per-material numbers for custom shaders (`object.data` in WGSL).
     pub data: [f32; 4],
+    /// Blending with the background (see [`BlendMode`]).
+    pub blend: BlendMode,
+    /// Draw back faces too (leaves, flags, planes seen from below).
+    pub double_sided: bool,
+    /// Casts a shadow from the sun (`RenderSettings::shadows`).
+    pub cast_shadow: bool,
 }
 
 impl Default for Material {
     fn default() -> Self {
-        Self { color: Color::WHITE, texture: None, tiling: Vec2::ONE, unlit: false, shader: None, data: [0.0; 4] }
+        Self {
+            color: Color::WHITE,
+            texture: None,
+            tiling: Vec2::ONE,
+            unlit: false,
+            shader: None,
+            data: [0.0; 4],
+            blend: BlendMode::Auto,
+            double_sided: false,
+            cast_shadow: true,
+        }
     }
 }
 
@@ -65,6 +116,30 @@ impl Material {
     pub fn with_shader(mut self, shader: Option<ShaderId>) -> Self {
         self.shader = shader;
         self
+    }
+
+    pub fn with_blend(mut self, blend: BlendMode) -> Self {
+        self.blend = blend;
+        self
+    }
+
+    pub fn with_double_sided(mut self, on: bool) -> Self {
+        self.double_sided = on;
+        self
+    }
+
+    /// The blend mode actually used (`Auto` resolved).
+    pub fn effective_blend(&self) -> BlendMode {
+        match self.blend {
+            BlendMode::Auto if self.color.a < 0.999 => BlendMode::Alpha,
+            BlendMode::Auto => BlendMode::Opaque,
+            b => b,
+        }
+    }
+
+    /// Drawn in the transparent pass (no depth writes, sorted back to front).
+    pub fn is_transparent(&self) -> bool {
+        matches!(self.effective_blend(), BlendMode::Alpha | BlendMode::Additive)
     }
 
     pub fn with_data(mut self, data: [f32; 4]) -> Self {

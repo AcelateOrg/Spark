@@ -108,9 +108,60 @@ pub struct ShaderData {
     pub version: u64,
 }
 
-/// `fn <name>(` somewhere in `code` (comments are not stripped, keep it simple).
+/// `code` with `// line` and `/* block */` comments replaced by spaces (line numbers kept).
+fn strip_comments(code: &str) -> String {
+    let b = code.as_bytes();
+    let mut out = String::with_capacity(code.len());
+    let mut i = 0;
+    let mut depth = 0usize; // WGSL block comments nest
+    let mut line = false;
+    let mut start = 0;
+    while i < b.len() {
+        if line {
+            if b[i] == b'\n' {
+                line = false;
+                start = i; // the newline itself is kept
+            }
+            i += 1;
+        } else if depth > 0 {
+            if b[i..].starts_with(b"*/") {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    start = i;
+                }
+            } else if b[i..].starts_with(b"/*") {
+                depth += 1;
+                i += 2;
+            } else {
+                if b[i] == b'\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+        } else if b[i..].starts_with(b"//") {
+            out.push_str(&code[start..i]);
+            line = true;
+            i += 2;
+        } else if b[i..].starts_with(b"/*") {
+            out.push_str(&code[start..i]);
+            out.push(' ');
+            depth = 1;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    if !line && depth == 0 {
+        out.push_str(&code[start..]);
+    }
+    out
+}
+
+/// `fn <name>(` somewhere in `code`, ignoring comments.
 fn defines_fn(code: &str, name: &str) -> bool {
-    let mut rest = code;
+    let code = strip_comments(code);
+    let mut rest = code.as_str();
     while let Some(i) = rest.find("fn") {
         let before_ok = i == 0 || !rest.as_bytes()[i - 1].is_ascii_alphanumeric() && rest.as_bytes()[i - 1] != b'_';
         let after = rest[i + 2..].trim_start();
@@ -127,6 +178,7 @@ fn defines_fn(code: &str, name: &str) -> bool {
 }
 
 fn defines_struct(code: &str, name: &str) -> bool {
+    let code = strip_comments(code);
     code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .collect::<Vec<_>>()
         .windows(2)
@@ -319,7 +371,7 @@ mod tests {
             fn vertex(v: VertexInput) -> Fragment { var f = default_vertex(v); f.custom = vec4<f32>(params.amount); return f; }\n\
             fn fragment(f: Fragment) -> vec4<f32> { let c = default_fragment(f); return vec4<f32>(c.rgb * params.tint * f.custom.x, c.a); }\n";
         let mut s = ShaderData::compile("fx.wgsl", code).unwrap();
-        assert!(s.source.contains("return vertex(v);") && s.source.contains("return fragment(f);"));
+        assert!(s.source.contains("var f = vertex(v);") && s.source.contains("return fragment(f);"));
         assert_eq!(s.params.len(), 3);
         assert_eq!(s.find_param("tint").unwrap().offset, 16);
         assert_eq!(s.values.len(), 32);
@@ -350,6 +402,12 @@ mod tests {
     #[test]
     fn fn_detection() {
         assert!(defines_fn("fn vertex(v: VertexInput)", "vertex"));
+        assert!(!defines_fn("// fn vertex(v: VertexInput)\nfn fragment(f: Fragment)", "vertex"));
+        assert!(!defines_fn("/* old: fn post(p: PostInput) /* nested */ */ fn fragment(f: Fragment)", "post"));
+        assert!(defines_fn("/* c */ fn post(p: PostInput)", "post"));
+        assert!(!defines_struct("// struct Params { a: f32 }", "Params"));
+        assert_eq!(strip_comments("a // b\nc /* d\n */ e").lines().count(), 3);
+        assert_eq!(strip_comments("x // привет\ny /* мир */ z"), "x \ny   z");
         assert!(defines_fn("x;\nfn  fragment (f: Fragment)", "fragment"));
         assert!(!defines_fn("fn my_vertex(v: VertexInput)", "vertex"));
         assert!(!defines_fn("fn vertex2(v: VertexInput)", "vertex"));

@@ -66,6 +66,10 @@ pub struct ScriptGame {
     shader_error: Option<String>,
     /// Files loaded with `require` by the current run (hot reload).
     modules: Option<modules::SharedModules>,
+    /// Max time one callback may run before it is stopped with an error (infinite loop guard).
+    timeout: std::time::Duration,
+    /// Deadline of the callback running now (checked by the Luau interrupt).
+    deadline: Rc<std::cell::Cell<Option<Instant>>>,
 }
 
 impl ScriptGame {
@@ -84,7 +88,16 @@ impl ScriptGame {
             shader_mtimes: HashMap::new(),
             shader_error: None,
             modules: None,
+            timeout: std::time::Duration::from_secs(5),
+            deadline: Rc::default(),
         }
+    }
+
+    /// Max run time of one script callback (default 5 s). A `while true do end` then stops with
+    /// a clear error instead of freezing the game. `None` = no limit.
+    pub fn timeout(mut self, limit: Option<std::time::Duration>) -> Self {
+        self.timeout = limit.unwrap_or(std::time::Duration::MAX);
+        self
     }
 
     /// Exit the process with code 1 on the first script error (for headless / CI / AI runs).
@@ -134,7 +147,9 @@ impl ScriptGame {
         }
         let Some(lua) = self.lua.clone() else { return };
         std::mem::swap(world, &mut self.shared.borrow_mut());
+        self.deadline.set(Instant::now().checked_add(self.timeout));
         let result = f(&lua);
+        self.deadline.set(None);
         std::mem::swap(world, &mut self.shared.borrow_mut());
         if let Err(e) = result {
             self.fail(e.to_string());
@@ -143,6 +158,9 @@ impl ScriptGame {
 
     fn drop_lua(&mut self) {
         if let Some(old) = self.lua.take() {
+            if let Err(e) = save::flush(&old) {
+                log::error!("{e}");
+            }
             // Release every function / coroutine reference before the state goes away.
             if let Some(rt) = old.remove_app_data::<SharedRuntime>() {
                 rt.borrow_mut().clear();
@@ -166,6 +184,19 @@ impl ScriptGame {
         self.modules = Some(modules.clone());
         let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "main.luau".into());
         let lua = Lua::new();
+        let deadline = self.deadline.clone();
+        let limit = self.timeout;
+        lua.set_interrupt(move |_| {
+            if deadline.get().is_some_and(|d| Instant::now() > d) {
+                deadline.set(None); // report once; the error unwinds the callback
+                return Err(mlua::Error::runtime(format!(
+                    "script ran for more than {:.1} s without returning (infinite loop?). \
+                     Long work: split it over frames with wait() / task.spawn",
+                    limit.as_secs_f32()
+                )));
+            }
+            Ok(mlua::VmState::Continue)
+        });
         lua.set_app_data(Shared(self.shared.clone()));
         lua.set_app_data::<SharedRuntime>(Rc::default());
         lua.set_app_data(save::SavePath(self.save_path.clone()));
@@ -336,7 +367,7 @@ impl Game for ScriptGame {
             if let Some(f) = lua.globals().get::<Option<Function>>("render")? {
                 f.call::<()>(()).map_err(|e| e.context("in render()"))?;
             }
-            Ok(())
+            save::flush(lua)
         });
         if let Some(msg) = &self.shader_error {
             draw_error(world, "Shader error", msg, "Fix the shader and save it: it reloads automatically (the previous version keeps running).");

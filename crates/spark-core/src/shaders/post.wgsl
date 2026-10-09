@@ -43,6 +43,9 @@ fn scene_depth(uv: vec2<f32>) -> f32 {
 fn linear_depth(uv: vec2<f32>) -> f32 {
     let near = frame.camera.x;
     let far = frame.camera.y;
+    if (frame.proj[3][3] > 0.5) {  // orthographic camera: depth is linear
+        return near + scene_depth(uv) * (far - near);
+    }
     return far * near / (far - scene_depth(uv) * (far - near));
 }
 

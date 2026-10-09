@@ -16,7 +16,21 @@ spark --version
 ```
 
 Flags: `--headless`, `--frames N`, `--screenshot PATH`, `--dump-scene`, `--size WxH`, `--fixed-dt S`,
-`--no-vsync`, `--splash` / `--no-splash`, `--fullscreen`, `--windowed`, `--help`.
+`--no-vsync`, `--max-fps N`, `--splash` / `--no-splash`, `--fullscreen`, `--windowed`, `--help`.
+Headless testing: `--dump-scene-json PATH|-` (scene as JSON), `--screenshot-every N` (`shot-00060.png`, ...),
+`--timeout S` (fail when the run takes longer), `--input FILE` (scripted input, one event per line):
+
+```
+# frame  event
+10 key down space
+14 key up space
+20 mouse 640 360
+21 mouse_button down left
+40 wheel 1
+50 text hello
+```
+
+A script callback that runs longer than 5 s (e.g. `while true do end`) is stopped with an error instead of freezing the game.
 In a window F12 saves a screenshot to `screenshots/`, F11 or Alt+Enter toggles fullscreen.
 
 ### game.toml (optional, next to main.luau)
@@ -150,7 +164,9 @@ see "2D drawing"; the name `draw` is reserved for the drawing table).
 ### Frame order (always exactly this)
 
 1. input events: `key_pressed`, `key_released`, `mouse_pressed`, `mouse_released`, `wheel`
-2. `fixed_update(dt)` 0..N times (N depends on frame time; max 8)
+2. `fixed_update(dt)` 0..N times (N depends on frame time; max 8). `input.pressed/released` inside
+   `fixed_update` report every press exactly once (the first step after it), even at 144 Hz where many
+   frames run no fixed step. Physics bodies are drawn interpolated between steps: smooth on any refresh rate.
 3. `update(dt)`
 4. timers and tasks that are due (`after`, `every`, `wait`, `tween`, ...)
 5. events sent with `emit_later`
@@ -261,6 +277,9 @@ Primitives are centered at the origin (a cube of size 1 spans -0.5..0.5). Same p
 | `Material.texture(tex_or_path, tint="white")` | |
 | `Material.checker(a, b, repeats=1)` | 2x2 checker repeated `repeats` times across the surface |
 | `mat:tiling(x, y=x)`, `mat:with_color(c)`, `mat:with_unlit(true)` | return a modified copy |
+| `mat:with_blend("alpha")` | `"auto"` (default: alpha when color alpha < 1), `"opaque"`, `"alpha"` (glass, water, fades), `"additive"` (fire, glow) |
+| `mat:with_double_sided(true)`, `mat:with_cast_shadow(false)` | draw back faces (leaves, flags); no sun shadow |
+| `mat.blend`, `mat.double_sided`, `mat.cast_shadow` | read; objects also have `obj.blend`, `obj.double_sided`, `obj.cast_shadow` (read/write, also `spawn` props) |
 | `Color.rgb(r,g,b)`, `Color.rgba(r,g,b,a)`, `Color.hex("#ff8800")`, `Color.lerp(a,b,t)` | |
 | `Color.RED`, `Color.SKY`, ... | uppercase names of the color list above |
 | `color.r .g .b .a`, `color:lerp(c, t)`, `color:with_alpha(a)` | |
@@ -348,6 +367,9 @@ t:cancel()
 
 - `camera.position`, `camera.x/y/z`, `camera.rotation` (euler), `camera.fov` (degrees, default 60), `camera.near`, `camera.far`
 - `camera:look_at(vec_or_obj)`, `camera:translate(v)`, `camera:forward()`, `camera:right()`, `camera:up()`
+- `camera.ortho = 20` - orthographic camera showing 20 m vertically (strategy, 2.5D, editors); `nil` = perspective
+- `camera:world_to_screen(pos)` -> `x, y, depth` in window pixels (nil when behind the camera): health bars, markers
+- `camera:screen_to_ray(x?, y?)` -> `origin, direction` (default: mouse position): mouse picking with `raycast` / `pick`
 - Default camera: position (0, 3, 8) looking at the origin.
 - `sun(direction, color?, intensity?)` - direction the light travels, e.g. `vec3(-0.5, -1, -0.3)`
 - `ambient(color)`, `background(color)`, `fog(color, near=10, far=60)`, `fog(nil)` to disable
@@ -379,6 +401,9 @@ graphics.post = { vhs }                            -- chain of full-screen passe
 ```
 
 - `graphics.height` (nil or pixels), `graphics.scale` (0.05..2, multiplies the internal resolution), `graphics.upscale`, `graphics.filter`
+- `graphics.msaa` = 1 / 2 / 4 (default) / 8 or true/false - anti-aliasing of the 3D scene (falls back to what the GPU supports)
+- `graphics.shadows` (default true), `graphics.shadow_distance` (meters around the camera, default 40),
+  `graphics.shadow_size` (shadow map pixels, default 2048) - sun shadows; `obj.cast_shadow = false` per object
 - `graphics.scene_width`, `graphics.scene_height` -> current size of the 3D image in pixels (read-only)
 - `graphics.shader` = surface Shader or nil (default lit shader)
 - `graphics.post` = Shader, list of Shaders / `{ shader = s, size = "screen" | "scene" }`, or nil. `size = "scene"` runs the pass at
@@ -566,8 +591,10 @@ code behind `input.pressed(...)` only runs in a real session (`spark . --headles
 
 ## Saving
 
-Small persistent key/value storage, saved instantly to `%APPDATA%/SparkGames/<title>/save.json`
-(Linux / macOS: `~/.local/share/SparkGames/<title>/`). Headless runs keep it in memory only.
+Small persistent key/value storage in `%APPDATA%/SparkGames/<title>/save.json` (Windows),
+`~/Library/Application Support/SparkGames/<title>/` (macOS), `~/.local/share/SparkGames/<title>/` (Linux).
+Headless runs keep it in memory only. Changes are written once at the end of the frame (atomically, so a crash
+never leaves a half-written file) and on exit; `save.flush()` writes immediately. A damaged file is kept as `save.json.bak`.
 
 - `save.set(key, value)` - numbers, strings, booleans, vectors and (nested) tables of them; `nil` deletes
 - `save.get(key, default)` -> value or `default`; `save.has(key)`, `save.delete(key)`, `save.clear()`, `save.keys()`, `save.path()`

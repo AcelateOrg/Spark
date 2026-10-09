@@ -74,6 +74,8 @@ pub enum AudioCommand {
     StopBus { bus: BusId, fade: f32 },
     /// Pauses (`true`) or resumes every sound on the bus.
     PauseBus { bus: BusId, paused: bool, fade: f32 },
+    /// Forget every decoded sound (game reload): frees memory, changed files are read again.
+    ClearCache,
 }
 
 #[derive(Clone, Debug)]
@@ -265,6 +267,11 @@ impl Audio {
 
     pub fn set_pan(&mut self, id: SoundId, pan: f32) {
         self.commands.push(AudioCommand::SetPan { id, pan });
+    }
+
+    /// Drops the backend's decoded sounds (called on game reload).
+    pub fn clear_cache(&mut self) {
+        self.commands.push(AudioCommand::ClearCache);
     }
 
     pub fn stop_all(&mut self, fade: f32) {

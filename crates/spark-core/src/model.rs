@@ -258,6 +258,11 @@ impl ModelData {
                 let mut material = Material {
                     color: Color::rgba(to_srgb(f[0]), to_srgb(f[1]), to_srgb(f[2]), f[3]),
                     unlit: m.unlit(),
+                    double_sided: m.double_sided(),
+                    blend: match m.alpha_mode() {
+                        gltf::material::AlphaMode::Blend => crate::material::BlendMode::Alpha,
+                        _ => crate::material::BlendMode::Opaque,
+                    },
                     ..Default::default()
                 };
                 if let Some(info) = pbr.base_color_texture() {
@@ -378,8 +383,33 @@ fn read_uri(dir: &Path, uri: &str) -> Result<Vec<u8>, String> {
         let (_, data) = rest.split_once(";base64,").ok_or("unsupported data URI")?;
         return base64_decode(data).ok_or_else(|| "bad base64 data".into());
     }
-    let path = dir.join(percent_decode(uri));
-    crate::vfs::read(&path)
+    let rel = safe_relative(&percent_decode(uri)).ok_or_else(|| {
+        format!("refusing external file '{uri}': model files may only reference files next to / below the model")
+    })?;
+    crate::vfs::read(&dir.join(rel))
+}
+
+/// A relative path that stays inside its base folder (no absolute paths, drive letters, URL
+/// schemes or `..` climbing out). A downloaded model cannot read arbitrary files.
+fn safe_relative(uri: &str) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    if uri.contains("://") || uri.starts_with('/') || uri.starts_with('\\') || uri.get(1..2) == Some(":") {
+        return None;
+    }
+    let mut out = std::path::PathBuf::new();
+    for c in Path::new(&uri.replace('\\', "/")).components() {
+        match c {
+            Component::Normal(p) => out.push(p),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!out.as_os_str().is_empty()).then_some(out)
 }
 
 fn percent_decode(s: &str) -> String {
@@ -387,7 +417,7 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
+        if b[i] == b'%' && i + 3 <= b.len() {
             if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(v);
                 i += 3;
@@ -425,6 +455,17 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn uri_sandbox() {
+        use super::{percent_decode, safe_relative};
+        assert_eq!(safe_relative("textures/a.png").unwrap(), std::path::PathBuf::from("textures/a.png"));
+        assert_eq!(safe_relative("./x/../b.bin").unwrap(), std::path::PathBuf::from("b.bin"));
+        for bad in ["../secret.txt", "/etc/passwd", "C:/Windows/win.ini", "a/../../b", "http://x/y.png", "\\\\server\\share", ""] {
+            assert!(safe_relative(bad).is_none(), "{bad}");
+        }
+        assert_eq!(percent_decode("a%20b%20"), "a b ");
+    }
+
     use super::*;
 
     #[test]

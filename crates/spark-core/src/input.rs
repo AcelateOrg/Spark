@@ -250,10 +250,46 @@ pub struct Input {
     pub wheel: f32,
     /// Game wants the cursor hidden and captured (first-person look). `mouse_delta` then comes from raw motion.
     pub lock_mouse: bool,
+    /// Edges (pressed / released) not yet seen by any `fixed_update` (frames with 0 fixed steps).
+    carry: Edges,
+    /// The frame's own edges, parked while `fixed_update` runs with its own view.
+    stash: Option<Edges>,
+    fixed_seen: bool,
     /// Text typed this frame (layout- and IME-aware, control characters removed). Cleared by `end_frame`.
     pub text: String,
     /// Keys that went down or auto-repeated (key held) this frame.
     repeated: HashSet<Key>,
+}
+
+/// Pressed / released state of one frame (or of one fixed step).
+#[derive(Clone, Debug, Default)]
+struct Edges {
+    pressed: HashSet<Key>,
+    released: HashSet<Key>,
+    mouse_pressed: [bool; MOUSE_BUTTONS],
+    mouse_released: [bool; MOUSE_BUTTONS],
+    pads: Vec<(usize, [bool; PAD_BUTTONS], [bool; PAD_BUTTONS])>,
+}
+
+impl Edges {
+    fn merge(&mut self, o: &Edges) {
+        self.pressed.extend(o.pressed.iter().copied());
+        self.released.extend(o.released.iter().copied());
+        for i in 0..MOUSE_BUTTONS {
+            self.mouse_pressed[i] |= o.mouse_pressed[i];
+            self.mouse_released[i] |= o.mouse_released[i];
+        }
+        for (id, p, r) in &o.pads {
+            if let Some(e) = self.pads.iter_mut().find(|e| e.0 == *id) {
+                for i in 0..PAD_BUTTONS {
+                    e.1[i] |= p[i];
+                    e.2[i] |= r[i];
+                }
+            } else {
+                self.pads.push((*id, *p, *r));
+            }
+        }
+    }
 }
 
 impl Input {
@@ -384,8 +420,81 @@ impl Input {
         self.wheel += amount;
     }
 
+    fn take_edges(&mut self) -> Edges {
+        let pads = self
+            .pads
+            .iter_mut()
+            .map(|p| (p.id, std::mem::take(&mut p.pressed), std::mem::take(&mut p.released)))
+            .collect();
+        Edges {
+            pressed: std::mem::take(&mut self.pressed),
+            released: std::mem::take(&mut self.released),
+            mouse_pressed: std::mem::take(&mut self.mouse_pressed),
+            mouse_released: std::mem::take(&mut self.mouse_released),
+            pads,
+        }
+    }
+
+    fn put_edges(&mut self, e: Edges) {
+        self.pressed = e.pressed;
+        self.released = e.released;
+        self.mouse_pressed = e.mouse_pressed;
+        self.mouse_released = e.mouse_released;
+        for p in &mut self.pads {
+            let (pr, re) = e.pads.iter().find(|x| x.0 == p.id).map(|x| (x.1, x.2)).unwrap_or_default();
+            p.pressed = pr;
+            p.released = re;
+        }
+    }
+
+    /// Switches `pressed` / `released` to the view of a fixed step. The first fixed step of a
+    /// frame sees every edge that happened since the previous fixed step (including frames that
+    /// ran no fixed step at all, e.g. at 144 Hz), later steps of the same frame see none — so a
+    /// key press is reported to `fixed_update` exactly once and never lost.
+    pub fn begin_fixed_step(&mut self, first: bool) {
+        if first {
+            let frame = self.take_edges();
+            let mut view = std::mem::take(&mut self.carry);
+            view.merge(&frame);
+            self.stash = Some(frame);
+            self.put_edges(view);
+            self.fixed_seen = true;
+        } else {
+            self.take_edges();
+        }
+    }
+
+    /// `pressed` of the frame itself, even while a fixed step has its own view (frame events).
+    pub fn frame_pressed(&self, key: Key) -> bool {
+        self.stash.as_ref().map_or_else(|| self.pressed(key), |e| e.pressed.contains(&key))
+    }
+
+    pub fn frame_released(&self, key: Key) -> bool {
+        self.stash.as_ref().map_or_else(|| self.released(key), |e| e.released.contains(&key))
+    }
+
+    pub fn frame_mouse_pressed(&self, b: MouseButton) -> bool {
+        self.stash.as_ref().map_or_else(|| self.mouse_pressed(b), |e| e.mouse_pressed[b.index()])
+    }
+
+    pub fn frame_mouse_released(&self, b: MouseButton) -> bool {
+        self.stash.as_ref().map_or_else(|| self.mouse_released(b), |e| e.mouse_released[b.index()])
+    }
+
+    /// Restores the frame's own `pressed` / `released` for `update` (after the fixed steps).
+    pub fn end_fixed_steps(&mut self) {
+        if let Some(frame) = self.stash.take() {
+            self.put_edges(frame);
+        }
+    }
+
     /// Call after each update: clears per-frame state.
     pub fn end_frame(&mut self) {
+        if !self.fixed_seen {
+            let e = self.take_edges();
+            self.carry.merge(&e);
+        }
+        self.fixed_seen = false;
         self.pressed.clear();
         self.released.clear();
         self.repeated.clear();
@@ -414,6 +523,36 @@ impl Input {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fixed_steps_see_each_press_once() {
+        use super::*;
+        let mut i = Input::default();
+        // Frame 1: key pressed, no fixed step this frame (high refresh rate).
+        i.key_event(Key::Space, true);
+        assert!(i.pressed(Key::Space));
+        i.end_frame();
+        // Frame 2: two fixed steps -> only the first sees the press; update does not.
+        i.begin_fixed_step(true);
+        assert!(i.pressed(Key::Space));
+        i.begin_fixed_step(false);
+        assert!(!i.pressed(Key::Space));
+        i.end_fixed_steps();
+        assert!(!i.pressed(Key::Space));
+        assert!(i.down(Key::Space));
+        i.end_frame();
+        // Frame 3: press + steps in the same frame -> both update and fixed see it once.
+        i.key_event(Key::Space, false);
+        i.key_event(Key::Space, true);
+        i.begin_fixed_step(true);
+        assert!(i.pressed(Key::Space) && i.released(Key::Space));
+        i.end_fixed_steps();
+        assert!(i.pressed(Key::Space));
+        i.end_frame();
+        i.begin_fixed_step(true);
+        assert!(!i.pressed(Key::Space));
+        i.end_fixed_steps();
+    }
+
     use super::*;
 
     #[test]
