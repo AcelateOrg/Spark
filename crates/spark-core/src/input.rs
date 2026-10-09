@@ -34,6 +34,21 @@ keys! {
     LShift => "lshift", RShift => "rshift", LCtrl => "lctrl", RCtrl => "rctrl", LAlt => "lalt", RAlt => "ralt",
     F1 => "f1", F2 => "f2", F3 => "f3", F4 => "f4", F5 => "f5", F6 => "f6",
     F7 => "f7", F8 => "f8", F9 => "f9", F10 => "f10", F11 => "f11", F12 => "f12",
+    // Punctuation (US layout positions).
+    Minus => "minus", Equal => "equal", BracketLeft => "bracketleft", BracketRight => "bracketright",
+    Backslash => "backslash", Semicolon => "semicolon", Quote => "quote", Comma => "comma",
+    Period => "period", Slash => "slash", Backquote => "backquote",
+    // Navigation / editing.
+    Insert => "insert", Delete => "delete", Home => "home", End => "end", PageUp => "pageup", PageDown => "pagedown",
+    CapsLock => "capslock", NumLock => "numlock", ScrollLock => "scrolllock", PrintScreen => "printscreen",
+    Pause => "pause", Menu => "menu", LSuper => "lsuper", RSuper => "rsuper",
+    // Numpad (numpad Enter is reported as "enter").
+    Numpad0 => "numpad0", Numpad1 => "numpad1", Numpad2 => "numpad2", Numpad3 => "numpad3", Numpad4 => "numpad4",
+    Numpad5 => "numpad5", Numpad6 => "numpad6", Numpad7 => "numpad7", Numpad8 => "numpad8", Numpad9 => "numpad9",
+    NumpadAdd => "numpad_add", NumpadSubtract => "numpad_subtract", NumpadMultiply => "numpad_multiply",
+    NumpadDivide => "numpad_divide", NumpadDecimal => "numpad_decimal",
+    F13 => "f13", F14 => "f14", F15 => "f15", F16 => "f16", F17 => "f17", F18 => "f18",
+    F19 => "f19", F20 => "f20", F21 => "f21", F22 => "f22", F23 => "f23", F24 => "f24",
 }
 
 impl Key {
@@ -46,6 +61,27 @@ impl Key {
             "alt" => &[Key::LAlt, Key::RAlt],
             "esc" => &[Key::Escape],
             "return" => &[Key::Enter],
+            "super" | "meta" | "cmd" | "command" | "win" | "windows" => &[Key::LSuper, Key::RSuper],
+            "lmeta" | "lcmd" | "lwin" => &[Key::LSuper],
+            "rmeta" | "rcmd" | "rwin" => &[Key::RSuper],
+            "-" => &[Key::Minus],
+            "=" | "equals" => &[Key::Equal],
+            "[" => &[Key::BracketLeft],
+            "]" => &[Key::BracketRight],
+            "\\" => &[Key::Backslash],
+            ";" => &[Key::Semicolon],
+            "'" | "apostrophe" => &[Key::Quote],
+            "," => &[Key::Comma],
+            "." => &[Key::Period],
+            "/" => &[Key::Slash],
+            "`" | "grave" | "backtick" | "tilde" => &[Key::Backquote],
+            "del" => &[Key::Delete],
+            "ins" => &[Key::Insert],
+            "pgup" => &[Key::PageUp],
+            "pgdn" => &[Key::PageDown],
+            "prtsc" | "print" => &[Key::PrintScreen],
+            "numpad_plus" => &[Key::NumpadAdd],
+            "numpad_minus" => &[Key::NumpadSubtract],
             _ => &[],
         };
         if !alias.is_empty() {
@@ -53,22 +89,49 @@ impl Key {
         }
         Key::from_name(&lower).map(|k| vec![k])
     }
+
+    /// Every key name and alias, for error messages and docs.
+    pub fn names() -> String {
+        let mut s: Vec<&str> = Key::ALL.iter().map(|k| k.name()).collect();
+        s.extend(["shift", "ctrl", "alt", "super", "esc", "return"]);
+        s.join(" ")
+    }
 }
 
-/// Mouse button.
+/// Mouse button. `Back` / `Forward` are the side buttons (4 / 5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
     Right,
     Middle,
+    Back,
+    Forward,
 }
 
+const MOUSE_BUTTONS: usize = 5;
+
 impl MouseButton {
+    pub const ALL: &'static [MouseButton] =
+        &[MouseButton::Left, MouseButton::Right, MouseButton::Middle, MouseButton::Back, MouseButton::Forward];
+
+    /// Script name: `left right middle back forward`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Middle => "middle",
+            Self::Back => "back",
+            Self::Forward => "forward",
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "left" => Some(Self::Left),
             "right" => Some(Self::Right),
             "middle" => Some(Self::Middle),
+            "back" | "x1" | "mouse4" => Some(Self::Back),
+            "forward" | "x2" | "mouse5" => Some(Self::Forward),
             _ => None,
         }
     }
@@ -175,9 +238,9 @@ pub struct Input {
     down: HashSet<Key>,
     pressed: HashSet<Key>,
     released: HashSet<Key>,
-    mouse_down: [bool; 3],
-    mouse_pressed: [bool; 3],
-    mouse_released: [bool; 3],
+    mouse_down: [bool; MOUSE_BUTTONS],
+    mouse_pressed: [bool; MOUSE_BUTTONS],
+    mouse_released: [bool; MOUSE_BUTTONS],
     has_mouse_position: bool,
     /// Cursor position in window pixels (0,0 = top-left).
     pub mouse_position: Vec2,
@@ -187,6 +250,10 @@ pub struct Input {
     pub wheel: f32,
     /// Game wants the cursor hidden and captured (first-person look). `mouse_delta` then comes from raw motion.
     pub lock_mouse: bool,
+    /// Text typed this frame (layout- and IME-aware, control characters removed). Cleared by `end_frame`.
+    pub text: String,
+    /// Keys that went down or auto-repeated (key held) this frame.
+    repeated: HashSet<Key>,
 }
 
 impl Input {
@@ -203,6 +270,16 @@ impl Input {
     /// Went up this frame.
     pub fn released(&self, key: Key) -> bool {
         self.released.contains(&key)
+    }
+
+    /// Went down or auto-repeated this frame (held keys repeat at the OS rate): menus, text fields.
+    pub fn repeated(&self, key: Key) -> bool {
+        self.repeated.contains(&key)
+    }
+
+    /// Text typed this frame.
+    pub fn text(&self) -> &str {
+        &self.text
     }
 
     pub fn mouse_down(&self, button: MouseButton) -> bool {
@@ -266,9 +343,16 @@ impl Input {
             if self.down.insert(key) {
                 self.pressed.insert(key);
             }
+            // A press while already down is an OS auto-repeat.
+            self.repeated.insert(key);
         } else if self.down.remove(&key) {
             self.released.insert(key);
         }
+    }
+
+    /// Typed text (winit `KeyboardInput.text`, IME commit). Control characters (Enter, Backspace, ...) are dropped.
+    pub fn text_event(&mut self, text: &str) {
+        self.text.extend(text.chars().filter(|c| !c.is_control()));
     }
 
     pub fn mouse_button_event(&mut self, button: MouseButton, is_down: bool) {
@@ -304,8 +388,10 @@ impl Input {
     pub fn end_frame(&mut self) {
         self.pressed.clear();
         self.released.clear();
-        self.mouse_pressed = [false; 3];
-        self.mouse_released = [false; 3];
+        self.repeated.clear();
+        self.text.clear();
+        self.mouse_pressed = [false; MOUSE_BUTTONS];
+        self.mouse_released = [false; MOUSE_BUTTONS];
         for p in &mut self.pads {
             p.pressed = [false; PAD_BUTTONS];
             p.released = [false; PAD_BUTTONS];
@@ -320,7 +406,7 @@ impl Input {
         for k in keys {
             self.key_event(k, false);
         }
-        for b in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+        for &b in MouseButton::ALL {
             self.mouse_button_event(b, false);
         }
     }
@@ -329,6 +415,55 @@ impl Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_names_round_trip_and_aliases() {
+        let mut seen = HashSet::new();
+        for &k in Key::ALL {
+            assert!(seen.insert(k.name()), "duplicate key name {}", k.name());
+            assert_eq!(Key::from_name(k.name()), Some(k));
+            assert_eq!(Key::resolve(k.name()), Some(vec![k]));
+        }
+        assert_eq!(Key::resolve("-"), Some(vec![Key::Minus]));
+        assert_eq!(Key::resolve("`"), Some(vec![Key::Backquote]));
+        assert_eq!(Key::resolve("\\"), Some(vec![Key::Backslash]));
+        assert_eq!(Key::resolve("PgUp"), Some(vec![Key::PageUp]));
+        assert_eq!(Key::resolve("cmd"), Some(vec![Key::LSuper, Key::RSuper]));
+        assert_eq!(Key::resolve("numpad5"), Some(vec![Key::Numpad5]));
+        assert_eq!(Key::resolve("f24"), Some(vec![Key::F24]));
+        assert_eq!(Key::resolve("nope"), None);
+        assert!(Key::names().contains("bracketleft") && Key::names().contains("super"));
+    }
+
+    #[test]
+    fn side_mouse_buttons() {
+        let mut i = Input::default();
+        i.mouse_button_event(MouseButton::Back, true);
+        assert!(i.mouse_pressed(MouseButton::Back) && i.any_pressed());
+        i.end_frame();
+        i.release_all();
+        assert!(i.mouse_released(MouseButton::Back) && !i.mouse_down(MouseButton::Back));
+        assert_eq!(MouseButton::from_name("mouse5"), Some(MouseButton::Forward));
+        for &b in MouseButton::ALL {
+            assert_eq!(MouseButton::from_name(b.name()), Some(b));
+        }
+    }
+
+    #[test]
+    fn text_and_repeat() {
+        let mut i = Input::default();
+        i.text_event("Hi");
+        i.text_event("\r\u{8}");
+        i.text_event("ё");
+        assert_eq!(i.text(), "Hiё");
+        i.key_event(Key::Backspace, true);
+        assert!(i.pressed(Key::Backspace) && i.repeated(Key::Backspace));
+        i.end_frame();
+        assert_eq!(i.text(), "");
+        assert!(!i.repeated(Key::Backspace));
+        i.key_event(Key::Backspace, true); // OS auto-repeat
+        assert!(!i.pressed(Key::Backspace) && i.repeated(Key::Backspace));
+    }
 
     #[test]
     fn gamepad_buttons_axes_and_triggers() {

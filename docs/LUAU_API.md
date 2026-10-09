@@ -10,6 +10,9 @@ spark new path/to/game        # creates a new game in the recommended layout (se
 spark docs path/to/game       # (re)writes this reference into the game: docs/SPARK_API.md (+ AGENTS.md if missing)
 spark path/to/game            # runs path/to/game/main.luau in a window, hot-reloads on save
 spark game --headless --frames 120 --screenshot shot.png --dump-scene   # no window: check result as PNG + text
+spark check path/to/game      # finds script errors without a window / GPU (see "Type checking"; --json for tools)
+spark update [0.2.0]          # installs the latest (or given) Spark release over this spark executable
+spark --version
 ```
 
 Flags: `--headless`, `--frames N`, `--screenshot PATH`, `--dump-scene`, `--size WxH`, `--fixed-dt S`,
@@ -20,6 +23,7 @@ In a window F12 saves a screenshot to `screenshots/`, F11 or Alt+Enter toggles f
 
 ```toml
 title = "My Game"        # window title, save folder name, build name (default: folder name)
+spark = "0.1"            # engine version the game is made for (warns when run by an incompatible Spark)
 width = 1280             # window size
 height = 720
 fullscreen = false       # start in borderless fullscreen
@@ -33,6 +37,10 @@ splash = false           # show the "POWERED BY SPARK" splash before start() (de
 ```
 
 Unknown keys are errors (typos do not pass silently).
+
+`spark`: before 1.0 every minor version (0.1 -> 0.2) may change the API, so Spark 0.2 warns on a game made for
+0.1 (and an older Spark warns on a newer game). From 1.0 only the major version has to match. After updating the
+engine: `spark docs .` (new reference), adapt the code, then raise `spark` in game.toml.
 
 ### Sharing a game: spark build
 
@@ -488,8 +496,27 @@ Full 2D game: `examples/starfall/main.luau`.
 ## Input and time
 
 - `input.down(key)`, `input.pressed(key)` (this frame), `input.released(key)`
-- keys: `"a"`..`"z"`, `"0"`..`"9"`, `space enter escape tab backspace left right up down shift ctrl alt lshift rshift lctrl rctrl lalt ralt f1..f12` (`esc`, `return` also work)
-- `input.mouse_down(btn="left")`, `input.mouse_pressed(btn)`, `input.mouse_released(btn)`; buttons `left right middle`
+- `input.repeated(key)` - went down **or auto-repeated** this frame (key held, OS repeat rate): menus, text fields, held Backspace
+- `input.text()` -> string typed this frame (keyboard layout and IME aware: `"A"` with shift, `"ё"`, `"日本"`; no control
+  characters - check `"enter"` / `"backspace"` with `input.pressed` / `input.repeated`). `""` when nothing was typed.
+  ```lua
+  name ..= input.text()
+  if input.repeated("backspace") and #name > 0 then name = string.sub(name, 1, utf8.offset(name, -1) - 1) end
+  ```
+- keys (physical positions, US layout names; work the same on every OS):
+  - letters / digits: `"a"`..`"z"`, `"0"`..`"9"`
+  - `space enter escape tab backspace left right up down`
+  - modifiers: `shift ctrl alt super` (either side) or `lshift rshift lctrl rctrl lalt ralt lsuper rsuper`
+    (`super` = Windows key / Cmd on macOS; aliases `meta cmd win`)
+  - punctuation: `minus equal bracketleft bracketright backslash semicolon quote comma period slash backquote`
+    (or the character itself: `"-" "=" "[" "]" "\\" ";" "'" "," "." "/" "`"`)
+  - `insert delete home end pageup pagedown capslock numlock scrolllock printscreen pause menu`
+    (aliases `ins del pgup pgdn`)
+  - numpad: `numpad0`..`numpad9`, `numpad_add numpad_subtract numpad_multiply numpad_divide numpad_decimal`
+    (numpad Enter is `enter`)
+  - `f1`..`f24`; `esc`, `return` also work. An unknown name is an error that lists every key.
+- `input.mouse_down(btn="left")`, `input.mouse_pressed(btn)`, `input.mouse_released(btn)`;
+  buttons `left right middle back forward` (side buttons 4 / 5; aliases `mouse4 mouse5`)
 - `input.mouse()` -> x, y in pixels; `input.mouse_delta()` -> dx, dy; `input.wheel()` -> number
 - `input.lock_mouse(on=true)` - hide and capture the cursor for FPS mouse look (`mouse_delta` = raw motion); released automatically when the window loses focus, re-locked on focus. `input.mouse_locked()` -> bool. Typical: lock on click, unlock on Escape.
 - Gamepads (XInput / DirectInput / SDL mappings, hot-plug). `pad` = 1-based pad number; omit it to accept any pad.
@@ -502,6 +529,40 @@ Full 2D game: `examples/starfall/main.luau`.
 - `input.any_pressed()` -> any key, mouse button or pad button this frame ("press any key")
 - `time.dt`, `time.elapsed` (seconds), `time.frame`, `time.fps`, `time.unscaled_dt`, `time.unscaled_elapsed`
 - `time.scale` (read/write: 1 normal, 0.5 slow motion, 0 pause), `time.fixed_dt` (read/write, default 1/60)
+
+## Type checking
+
+Every game gets `docs/spark.d.luau`: type definitions of this whole API for [luau-lsp](https://github.com/JohnnyMorganz/luau-lsp)
+(written by `spark new` / `spark docs`, matching the engine version). With it the editor completes `input.`, `draw.`,
+object fields and key names, and underlines wrong names and arguments while you type.
+
+- VS Code: install the "Luau Language Server" extension. `spark new` / `spark docs` also write (only if missing)
+  `.vscode/settings.json` (`"luau-lsp.types.definitionFiles": { "@spark": "docs/spark.d.luau" }`, standard platform,
+  requires relative to the file) and `.luaurc` (`nonstrict` mode, alias `@game` = the game folder).
+  Other editors: pass the same definitions file to luau-lsp (`luau-lsp analyze --definitions=@spark=docs/spark.d.luau main.luau src/*.luau`).
+- Types: `Object`, `Color`, `Mesh`, `Texture`, `Material`, `Model`, `Shader`, `Font`, `Timer`, `Task`, `Listener`,
+  `Tween`, `Sound`, `Bus`, `Camera`, `Key`, `MouseButton`, `PadButton`, `ColorLike`, `SpawnProps`, `BodySpec`, ...
+  (`local enemies: { Object } = {}`). Key names are a literal type: for a key held in a `string` variable use `key :: Key`.
+- Add `--!strict` at the top of a file for full type checking of that file.
+
+`spark check` finds errors at runtime, without a window or GPU (CI, AI agents):
+
+```
+spark check path/to/game [--frames N] [--json]
+```
+
+1. compiles **every** `.luau` file of the game (syntax errors also in modules nothing requires yet);
+2. runs `main.luau` headless for N frames (default 60): `start()`, `update`, `fixed_update`, `render`, timers, tasks,
+   physics and every required module. No audio, no rendering.
+
+Prints `file:line: message` per error and exits with code 1 (0 = ok). `--json` prints one line:
+
+```json
+{"ok":false,"errors":[{"file":"src/player.luau","line":12,"message":"attempt to index nil with 'x'"}],"frames":4,"objects":17,"files":5}
+```
+
+`line` is `null` when the error has no location (e.g. a `game.toml` mistake). Input is empty during the check:
+code behind `input.pressed(...)` only runs in a real session (`spark . --headless` with a script that drives it, or a window).
 
 ## Saving
 

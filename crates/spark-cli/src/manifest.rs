@@ -7,12 +7,13 @@
 //! fullscreen = false
 //! icon = "icon.png"
 //! splash = true        # "Powered by Spark" intro (off by default)
+//! spark = "0.1"        # engine version the game is made for (warning on a mismatch)
 //! ```
 
 use std::path::Path;
 
 pub const FILE: &str = "game.toml";
-const KEYS: &str = "title, width, height, fullscreen, vsync, icon, show_fps, splash, save_name, build_name, exclude";
+const KEYS: &str = "title, width, height, fullscreen, vsync, icon, show_fps, splash, save_name, build_name, exclude, spark";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
@@ -33,6 +34,8 @@ pub struct Manifest {
     pub build_name: Option<String>,
     /// Extra files / folders that `spark build` leaves out.
     pub exclude: Vec<String>,
+    /// Engine version the game was made for, e.g. "0.1".
+    pub spark: Option<String>,
 }
 
 impl Default for Manifest {
@@ -49,6 +52,7 @@ impl Default for Manifest {
             save_name: None,
             build_name: None,
             exclude: Vec::new(),
+            spark: None,
         }
     }
 }
@@ -106,6 +110,13 @@ impl Manifest {
                 "splash" => m.splash = boolean(&val)?,
                 "save_name" => m.save_name = Some(string(&val)?),
                 "build_name" => m.build_name = Some(string(&val)?),
+                "spark" => {
+                    let v = string(&val)?;
+                    if parse_version(&v).is_none() {
+                        return Err(at(format!("spark must be a version like \"0.1\" or \"0.1.2\", got \"{v}\"")));
+                    }
+                    m.spark = Some(v);
+                }
                 "exclude" => match val {
                     Val::List(l) => m.exclude = l,
                     _ => return Err(at("exclude must be a list like [\"tools\", \"notes.txt\"]".into())),
@@ -115,6 +126,36 @@ impl Manifest {
         }
         Ok(m)
     }
+
+    /// A warning when the game was made for an incompatible engine version (`engine` = this engine, "0.1.0").
+    /// Compatible = same major version, or for 0.x the same minor version, and not older than the game wants.
+    pub fn version_warning(&self, engine: &str) -> Option<String> {
+        let want_s = self.spark.as_deref()?;
+        let want = parse_version(want_s)?;
+        let have = parse_version(engine)?;
+        let same_line = if want.0 == 0 { have.0 == 0 && have.1 == want.1 } else { have.0 == want.0 };
+        if same_line && have >= want {
+            return None;
+        }
+        let fix = if have < want {
+            "update Spark: spark update".to_string()
+        } else {
+            format!("run `spark docs .`, adapt the game, then set spark = \"{}.{}\" in game.toml", have.0, have.1)
+        };
+        Some(format!("this game is made for Spark {want_s}, this is Spark {engine}: the API may differ ({fix})"))
+    }
+}
+
+/// "0.1" / "0.1.2" / "1" -> (major, minor, patch).
+fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
+    let mut it = s.trim().trim_start_matches('v').split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next().map_or(Some(0), |p| p.parse().ok())?;
+    let patch = it.next().map_or(Some(0), |p| p.parse().ok())?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -197,5 +238,20 @@ mod tests {
         let e = Manifest::parse("titel = \"x\"").unwrap_err();
         assert!(e.contains("unknown key 'titel'"), "{e}");
         assert!(Manifest::parse("width = \"big\"").is_err());
+        assert!(Manifest::parse("spark = \"latest\"").is_err());
+    }
+
+    #[test]
+    fn engine_version_check() {
+        let game = |v: &str| Manifest::parse(&format!("spark = \"{v}\"")).unwrap();
+        assert_eq!(Manifest::default().version_warning("0.1.0"), None);
+        assert_eq!(game("0.1").version_warning("0.1.0"), None);
+        assert_eq!(game("0.1").version_warning("0.1.7"), None);
+        assert_eq!(game("0.1.2").version_warning("0.1.3"), None);
+        assert!(game("0.1.2").version_warning("0.1.1").unwrap().contains("spark update"));
+        assert!(game("0.1").version_warning("0.2.0").unwrap().contains("spark = \"0.2\""));
+        assert!(game("0.2").version_warning("0.1.0").is_some());
+        assert_eq!(game("1.2").version_warning("1.4.0"), None);
+        assert!(game("1.2").version_warning("2.0.0").is_some());
     }
 }

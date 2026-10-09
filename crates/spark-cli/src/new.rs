@@ -8,7 +8,8 @@
 //!   src/             game code, one module per system (require("./src/player"))
 //!   assets/          textures/ sounds/ models/ shaders/ fonts/
 //!   AGENTS.md        instructions for AI coding agents
-//!   docs/            the full Spark API reference, matching this engine version
+//!   docs/            the full Spark API reference + spark.d.luau type definitions, matching this engine version
+//!   .luaurc, .vscode/settings.json   luau-lsp setup: autocomplete and type checking of the Spark API
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -108,6 +109,7 @@ return Hud
 
 const TOML: &str = r##"# Spark game manifest (all keys optional, see docs/LUAU_API.md).
 title = "{TITLE}"
+spark = "{SPARK}"         # engine version the game is made for
 width = 1280
 height = 720
 # fullscreen = false
@@ -129,6 +131,8 @@ There is no editor - the scene, logic, UI and assets are all described in code.
 - `docs/SPARK_API.md` - the complete Luau API of the engine version this game was made with.
   Use only what is listed there: unknown functions, options and keys raise errors that name the allowed ones.
 - `docs/SPARK_SHADERS.md` - custom WGSL surface and post-process shaders.
+- `docs/spark.d.luau` - type definitions of the same API (luau-lsp). Editors with luau-lsp show wrong
+  names / arguments as you type (`.vscode/settings.json` and `.luaurc` are set up for it).
 
 ## Layout
 
@@ -136,16 +140,19 @@ There is no editor - the scene, logic, UI and assets are all described in code.
 - `src/` - one module per system: `local Player = require("./src/player")`, each file returns a table.
   Shared state lives in its own module (e.g. `src/state.luau`). Keep files under ~800 lines.
 - `assets/` - textures, sounds, models (glTF), shaders, fonts. Paths are relative to the game folder.
-- `game.toml` - title, window size, icon, build name.
+- `game.toml` - title, window size, icon, build name, `spark` = the engine version the game is made for.
+  After `spark update` to a new minor version, run `spark docs .`, adapt the code to the new API, then raise `spark`.
 
 ## Check your work (no window needed)
 
 ```
+spark check .                    # compiles every .luau file and runs 60 frames headless (no GPU): file:line: message
+spark check . --frames 300 --json   # {"ok":false,"errors":[{"file":"src/player.luau","line":12,"message":"..."}],...}
 spark . --headless --frames 120 --screenshot shot.png   # render a frame, then look at shot.png
 spark . --headless --frames 60 --dump-scene            # every object: position, rotation, bounds
 ```
 
-A script error stops a headless run with exit code 1 and prints `file:line`, the message and a hint.
+`spark check` and a headless run exit with code 1 on the first script error and print `file:line`, the message and a hint.
 Fix every error before moving on. `print(...)` goes to the log.
 
 ## Run and ship
@@ -165,14 +172,47 @@ colors as `"#rrggbb"` strings or `Color`.
 const DOCS: &[(&str, &str)] = &[
     ("docs/SPARK_API.md", include_str!("../../../docs/LUAU_API.md")),
     ("docs/SPARK_SHADERS.md", include_str!("../../../docs/SHADERS.md")),
+    ("docs/spark.d.luau", include_str!("../../../docs/spark.d.luau")),
 ];
+
+/// Editor setup for luau-lsp, written only when missing (the user may change them).
+const EDITOR: &[(&str, &str)] = &[(".luaurc", LUAURC), (".vscode/settings.json", VSCODE)];
+
+/// `require("@game/src/x")` resolves from the game folder, like the engine does. Engine callbacks
+/// (`function start()`, `update`, ...) are called by name, so "unused function" warnings are off.
+const LUAURC: &str = r#"{
+    "languageMode": "nonstrict",
+    "lint": {
+        "FunctionUnused": false
+    },
+    "aliases": {
+        "game": "."
+    }
+}
+"#;
+
+/// VS Code + "Luau Language Server" (JohnnyMorganz.luau-lsp): the Spark API from docs/spark.d.luau.
+const VSCODE: &str = r#"{
+    "luau-lsp.platform.type": "standard",
+    "luau-lsp.types.definitionFiles": {
+        "@spark": "docs/spark.d.luau"
+    },
+    "luau-lsp.sourcemap.enabled": false,
+    "luau-lsp.require.mode": "relativeToFile",
+    "files.associations": {
+        "*.luau": "luau"
+    }
+}
+"#;
 
 const ASSET_DIRS: &[&str] = &["textures", "sounds", "models", "shaders", "fonts"];
 
 /// `spark docs path/to/game`
 pub fn run_docs(args: &[String]) -> i32 {
     let [path] = args else {
-        eprintln!("usage: spark docs path/to/game   (writes docs/SPARK_API.md, docs/SPARK_SHADERS.md, AGENTS.md)");
+        eprintln!(
+            "usage: spark docs path/to/game   (writes docs/SPARK_API.md, docs/SPARK_SHADERS.md, docs/spark.d.luau; AGENTS.md, .luaurc, .vscode/settings.json if missing)"
+        );
         return 1;
     };
     let dir = PathBuf::from(path);
@@ -199,14 +239,17 @@ fn write_file(p: &Path, text: &str) -> Result<(), String> {
     std::fs::write(p, text).map_err(|e| format!("cannot write '{}': {e}", p.display()))
 }
 
-/// Engine docs are always overwritten (they belong to the engine); AGENTS.md only if missing (the user may edit it).
+/// Engine docs are always overwritten (they belong to the engine); AGENTS.md and the editor setup only if
+/// missing (the user may edit them).
 fn write_docs(dir: &Path) -> Result<(), String> {
     for (rel, text) in DOCS {
         write_file(&dir.join(rel), text)?;
     }
-    let agents = dir.join("AGENTS.md");
-    if !agents.exists() {
-        write_file(&agents, AGENTS)?;
+    for (rel, text) in [("AGENTS.md", AGENTS)].iter().chain(EDITOR) {
+        let p = dir.join(rel);
+        if !p.exists() {
+            write_file(&p, text)?;
+        }
     }
     Ok(())
 }
@@ -241,11 +284,16 @@ fn create(args: &[String]) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// "0.1" for engine 0.1.3: the API version a new game targets.
+fn engine_minor() -> String {
+    engine::VERSION.split('.').take(2).collect::<Vec<_>>().join(".")
+}
+
 fn write_template(dir: &Path, title: &str) -> Result<(), String> {
     let t = title.replace('"', "'");
     let files: [(&str, String); 6] = [
         ("main.luau", MAIN.replace("{TITLE}", &t)),
-        ("game.toml", TOML.replace("{TITLE}", &t)),
+        ("game.toml", TOML.replace("{TITLE}", &t).replace("{SPARK}", &engine_minor())),
         ("src/level.luau", LEVEL.into()),
         ("src/player.luau", PLAYER.into()),
         ("src/hud.luau", HUD.into()),
@@ -278,11 +326,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("spark-new-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_template(&dir, "Test \"Game\"").unwrap();
-        for f in ["main.luau", "game.toml", "src/player.luau", "src/level.luau", "src/hud.luau", "assets/textures/.gitkeep", "AGENTS.md", "docs/SPARK_API.md", "docs/SPARK_SHADERS.md"] {
+        for f in ["main.luau", "game.toml", "src/player.luau", "src/level.luau", "src/hud.luau", "assets/textures/.gitkeep", "AGENTS.md", "docs/SPARK_API.md", "docs/SPARK_SHADERS.md", "docs/spark.d.luau", ".luaurc", ".vscode/settings.json"] {
             assert!(dir.join(f).is_file(), "{f}");
         }
         let toml = std::fs::read_to_string(dir.join("game.toml")).unwrap();
-        assert!(crate::manifest::Manifest::parse(&toml).is_ok(), "{toml}");
+        let m = crate::manifest::Manifest::parse(&toml).expect(&toml);
+        assert!(m.version_warning(engine::VERSION).is_none(), "{toml}");
         // The template game runs without errors.
         let mut game = engine::script::ScriptGame::new(dir.join("main.luau")).hot_reload(false);
         let mut world = engine::World::new();
@@ -292,6 +341,35 @@ mod tests {
         }
         assert!(game.error().is_none(), "{:?}", game.error());
         assert!(world.scene.len() > 5, "level spawned");
+        // `spark check` agrees.
+        let report = crate::check::check(&dir, 30);
+        assert!(report.ok(), "{:?}", report.errors);
+        // User edits of the editor setup survive `spark docs`.
+        std::fs::write(dir.join(".luaurc"), "{}").unwrap();
+        write_docs(&dir).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(".luaurc")).unwrap(), "{}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn definitions_cover_every_input_name() {
+        let defs = include_str!("../../../docs/spark.d.luau");
+        for k in engine::Key::ALL {
+            assert!(defs.contains(&format!("\"{}\"", k.name())), "docs/spark.d.luau: Key type misses \"{}\"", k.name());
+        }
+        for b in engine::MouseButton::ALL {
+            assert!(defs.contains(&format!("\"{}\"", b.name())), "docs/spark.d.luau misses mouse button \"{}\"", b.name());
+        }
+        for b in engine::PadButton::ALL {
+            assert!(defs.contains(&format!("\"{}\"", b.name())), "docs/spark.d.luau misses pad button \"{}\"", b.name());
+        }
+        // Every global table of the API reference is declared.
+        for g in ["input", "time", "camera", "graphics", "physics", "sound", "draw", "screen", "save", "window", "Mesh", "Texture", "Material", "Color", "Model", "Shader", "Font"] {
+            assert!(defs.contains(&format!("declare {g}:")), "docs/spark.d.luau misses `declare {g}:`");
+        }
+        let api = include_str!("../../../docs/LUAU_API.md");
+        for f in ["input.text()", "input.repeated(", "spark check"] {
+            assert!(api.contains(f), "docs/LUAU_API.md does not document {f}");
+        }
     }
 }

@@ -19,3 +19,5 @@ gui = []
 
 [dependencies]
 engine = { package = "spark", path = "../spark" }
+# `spark check`: compiles every .luau module (syntax check without running it).
+mlua.workspace = true
