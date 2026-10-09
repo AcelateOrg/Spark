@@ -58,44 +58,71 @@ Spark does not try to compete with Unity, Unreal or Godot. It has a different jo
 | **Render** | wgpu (Vulkan / DirectX 12 / Metal / OpenGL fallback). 3D meshes and primitives, glTF 2.0 models with skins and animations, sun / point / spot lights, fog, your own WGSL surface and full-screen post shaders with hot reload ([docs/SHADERS.md](docs/SHADERS.md)), low internal resolution for weak PCs |
 | **2D** | immediate-mode drawing: sprites and sprite sheets, text with any TTF/OTF font, shapes, transforms, UI and in-scene layers |
 | **Script** | Luau runtime with hot reload, modules (`require`), timers, coroutine tasks with `wait`, tweens |
-| **Input** | keyboard, mouse (with FPS mouse lock), gamepads with hot-plug |
+| **Input** | full keyboard (punctuation, numpad, F1-F24), text input with IME, key repeat, mouse with side buttons and FPS mouse lock, gamepads with hot-plug |
 | **Audio** | wav / ogg / mp3 / flac, 3D positional sound, fades, mixer buses (music / sfx / ui ...), layered music |
 | **Events** | events with priorities, one-shot listeners, per-object events, deferred events, collision events |
 | **Physics** | rapier3d: dynamic / kinematic / static bodies, character controller, raycasts, collision events, picking against rendered meshes |
 | **Ship** | `spark build` packs the game into **one executable** (+ zip). Save files, fullscreen, window icon, splash |
 
-## Install (Windows)
+## Install
 
-In PowerShell:
+**Windows** (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/AcelateOrg/Spark/main/install.ps1 | iex
 ```
 
-This downloads the latest release into `%LOCALAPPDATA%\Spark\bin` and adds it to your `PATH` (no admin rights).
+Installs into `%LOCALAPPDATA%\Spark\bin` and adds it to your `PATH` (no admin rights).
+
+**Linux / macOS** (terminal):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/AcelateOrg/Spark/main/install.sh | sh
+```
+
+Installs into `~/.local/bin` (`SPARK_BIN=/usr/local/bin` to change it) and prints a hint if that folder is not on your `PATH`.
+
 Open a new terminal, then:
 
 ```
 spark new mygame          # a working game in the recommended layout
 spark mygame              # run it; edit any file and it reloads
-spark build mygame        # dist/mygame.exe - one file with everything inside
+spark check mygame        # find script errors without a window (CI / AI agents; --json)
+spark build mygame        # dist/mygame(.exe) - one file with everything inside
 spark update              # later: install the newest Spark
 ```
 
-Or download `spark-windows-x64.zip` from [Releases](https://github.com/AcelateOrg/Spark/releases) and put
-`spark.exe` anywhere you like. The exe is not code-signed yet, so Windows SmartScreen may say "Unknown publisher"
-and some antivirus programs may be suspicious of fresh unsigned builds.
+Or download the archive for your system from [Releases](https://github.com/AcelateOrg/Spark/releases) and put
+`spark` / `spark.exe` anywhere you like. The binaries are not code-signed yet: Windows SmartScreen may say
+"Unknown publisher"; on macOS a browser-downloaded binary needs `xattr -d com.apple.quarantine spark` (the installer
+does not need this).
 
-Prebuilt binaries are Windows x64 only for now; on Linux and macOS build from source.
+### Platforms
+
+| OS | Prebuilt release | Graphics | Notes |
+|---|---|---|---|
+| Windows 10/11 x64 | `spark-windows-x64.zip` | DirectX 12 / Vulkan | player builds hide the console window |
+| Linux x64 (X11 and Wayland) | `spark-linux-x64.tar.gz` | Vulkan (OpenGL fallback) | needs ALSA and libudev at runtime (present on desktop distros) |
+| macOS 11+ Apple Silicon | `spark-macos-arm64.tar.gz` | Metal | `spark build --app` also makes a `.app` bundle |
+| others (Linux arm64, Intel Mac, ...) | - | | build from source |
+
+`spark build` makes the executable for the OS it runs on: `Name.exe` + `Name.zip` on Windows, `Name` (executable bit set)
++ `Name.tar.gz` on Linux, `Name` + `Name.zip` (optionally `Name.app`) on macOS. To ship to all three, run it on each
+system (or in CI). CI builds and tests every commit on all three systems.
 
 ### Build from source
 
-Requires [Rust](https://rustup.rs) 1.85+.
+Requires [Rust](https://rustup.rs) 1.85+. On Linux also the development packages for audio, gamepads and keyboard:
+
+```sh
+sudo apt install libasound2-dev libudev-dev libxkbcommon-dev libdbus-1-dev pkg-config   # Debian / Ubuntu
+sudo dnf install alsa-lib-devel systemd-devel libxkbcommon-devel dbus-devel             # Fedora
+```
 
 ```
 git clone https://github.com/AcelateOrg/Spark.git
 cd Spark
-cargo build --release
+cargo build --release -p spark-cli
 target/release/spark new mygame
 ```
 
@@ -129,7 +156,9 @@ cargo run -p hello                        # the same idea in pure Rust
 
 1. `spark new mygame` and open the folder in your agent.
 2. Describe the game. The agent reads `AGENTS.md` and `docs/SPARK_API.md` and writes the code.
-3. It checks itself with `spark . --headless --frames 120 --screenshot shot.png` and looks at the picture.
+3. It checks itself with `spark check . --json` (errors as `file:line`) and
+   `spark . --headless --frames 120 --screenshot shot.png` (looks at the picture).
+   Editors with luau-lsp type-check the code against `docs/spark.d.luau`.
 4. You play with `spark .` - every save reloads the game.
 5. `spark build .` gives you one `.exe` to send to friends or upload to itch.io.
 
@@ -140,9 +169,10 @@ After updating the engine, `spark docs mygame` refreshes the API reference insid
 ```
 spark path/to/game [flags]           run a game (folder with main.luau)
 spark new path/to/game               new game: main.luau, src/, assets/, game.toml, AGENTS.md, docs/
-spark docs path/to/game              refresh docs/ and AGENTS.md
-spark build path/to/game [--out DIR] [--loose] [--no-zip]
-spark update [VERSION]               install the latest (or given) release over this spark.exe
+spark docs path/to/game              refresh docs/ (API reference, spark.d.luau) and AGENTS.md
+spark check path/to/game [--frames N] [--json]   headless error check, no GPU; exit code 1 on errors
+spark build path/to/game [--out DIR] [--loose] [--no-zip] [--app]
+spark update [VERSION]               install the latest (or given) release over this spark executable
 spark --version
 ```
 
@@ -151,7 +181,7 @@ spark --version
 
 Flags for every game: `--headless`, `--frames N`, `--screenshot PATH`, `--dump-scene`, `--size WxH`, `--fixed-dt S`,
 `--no-vsync`, `--splash` / `--no-splash`, `--fullscreen`, `--windowed`, `--help`.
-In a window: F12 = screenshot, F11 / Alt+Enter = fullscreen. Environment: `RUST_LOG=debug`, `WGPU_BACKEND=dx12|vulkan|gl`.
+In a window: F12 = screenshot, F11 / Alt+Enter = fullscreen. Environment: `RUST_LOG=debug`, `WGPU_BACKEND=dx12|vulkan|metal|gl`.
 
 ## Architecture
 
@@ -170,17 +200,19 @@ Conventions: Y-up, right-handed, 1 unit = 1 meter, objects look along -Z, radian
 
 ## Status
 
-Early version (0.1). Windows 10/11 x64 is the main and tested platform; the code is cross-platform, but Linux and
-macOS builds are not tested yet. The API can still change between versions - `spark docs` keeps a game's docs in sync.
+Early version (0.1). Windows 10/11 x64 is the main and most played platform; Linux (X11 / Wayland) and macOS
+are built and tested by CI on every commit (headless tests), but have seen less real play. The API can still change between versions - `spark docs` keeps a game's docs in sync.
 
 ## Releases (maintainers)
 
-Every push to `main` builds `spark.exe` and uploads it as the `spark-windows-x64` artifact of the
-[Build workflow](.github/workflows/ci.yml).
+Every push and pull request runs the [CI workflow](.github/workflows/ci.yml) on Windows, Linux and macOS:
+clippy (`-D warnings`), release build, `cargo test`, and `spark new` + `spark check --json` on the template game.
+The binaries are uploaded as `spark-windows-x64`, `spark-linux-x64` and `spark-macos-arm64` artifacts.
 
 To release: bump `version` in the root `Cargo.toml`, push, then create a release on GitHub (Releases > Draft a new
-release, tag `v0.1.0`). The [release workflow](.github/workflows/release.yml) builds `spark-windows-x64.zip` and
-attaches it to the release (a few minutes); `install.ps1` and `spark update` download it from there.
+release, tag `v0.1.0`). The [release workflow](.github/workflows/release.yml) builds `spark-windows-x64.zip`,
+`spark-linux-x64.tar.gz` and `spark-macos-arm64.tar.gz` and attaches them to the release (a few minutes);
+`install.ps1`, `install.sh` and `spark update` download them from there (keep the asset names).
 
 ## License
 
