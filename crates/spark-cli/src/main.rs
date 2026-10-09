@@ -4,6 +4,7 @@
 //!
 //! `spark new path/to/game` - a new game with the recommended folder layout (+ AGENTS.md and the API docs).
 //! `spark docs path/to/game` - refresh the API docs inside a game after an engine update.
+//! `spark update [version]` - replace this spark.exe with a GitHub release.
 //!
 //! `spark build path/to/game` - a player build: ONE executable (this binary, no console window) with
 //! every game file packed inside, plus a .zip. When such an executable starts it runs its packed game.
@@ -12,6 +13,7 @@
 mod dist;
 mod manifest;
 mod new;
+mod update;
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +26,8 @@ const USAGE: &str = "Usage:
   spark path/to/game [flags]              run a game (folder with main.luau, or the .luau file)
   spark new path/to/game                  create a new game with the recommended layout
   spark docs path/to/game                 write the API docs + AGENTS.md (for AI agents) into a game
+  spark update [version]                  download the latest (or given) Spark release from GitHub
+  spark --version
   spark build path/to/game [--out DIR]    make a player build: one .exe with everything inside (+ .zip)
                            [--loose]      exe + game files in a folder instead
                            [--no-zip]";
@@ -39,6 +43,7 @@ fn main() {
         Some("build") => std::process::exit(dist::run(&raw[1..])),
         Some("new") => std::process::exit(new::run(&raw[1..])),
         Some("docs") => std::process::exit(new::run_docs(&raw[1..])),
+        Some("update") => std::process::exit(update::run(&raw[1..])),
         Some("--version" | "-V") => {
             println!("spark {}", engine::VERSION);
             return;
@@ -92,6 +97,11 @@ fn run(app: App, path: PathBuf, dir: PathBuf, packed: bool) {
             std::process::exit(2);
         }
     };
+    if !packed {
+        if let Some(w) = manifest.version_warning(engine::VERSION) {
+            eprintln!("spark: warning: {w}");
+        }
+    }
     let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Spark".into());
     let title = manifest.title.clone().unwrap_or(folder);
     let headless = app.args().headless;

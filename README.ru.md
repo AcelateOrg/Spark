@@ -65,7 +65,31 @@ SPARK не пытается тягаться с Unity, Unreal Engine или Godo
 | **Physics** | rapier3d: динамические / кинематические / статические тела, контроллер персонажа, рейкасты, события столкновений, пикинг по отрисованным мешам |
 | **Ship** | `spark build` упаковывает игру в **один exe** (+ zip). Сохранения, полноэкранный режим, иконка окна, сплэш |
 
-## Быстрый старт
+## Установка (Windows)
+
+В PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/AcelateOrg/Spark/main/install.ps1 | iex
+```
+
+Скрипт скачает последний релиз в `%LOCALAPPDATA%\Spark\bin` и добавит его в `PATH` (права администратора не нужны).
+Открой новый терминал:
+
+```
+spark new mygame          # рабочая игра в рекомендуемой структуре
+spark mygame              # запуск; правишь любой файл — игра перезагружается
+spark build mygame        # dist/mygame.exe — один файл, всё внутри
+spark update              # потом: поставить свежую версию Spark
+```
+
+Или скачай `spark-windows-x64.zip` со страницы [Releases](https://github.com/AcelateOrg/Spark/releases) и положи
+`spark.exe` куда угодно. Exe пока не подписан, поэтому Windows SmartScreen может написать «Неизвестный издатель»,
+а некоторые антивирусы — косо смотреть на свежие неподписанные сборки.
+
+Готовые сборки пока только под Windows x64; на Linux и macOS — сборка из исходников.
+
+### Сборка из исходников
 
 Нужен [Rust](https://rustup.rs) 1.85+.
 
@@ -73,10 +97,10 @@ SPARK не пытается тягаться с Unity, Unreal Engine или Godo
 git clone https://github.com/AcelateOrg/Spark.git
 cd Spark
 cargo build --release
-target/release/spark new mygame          # рабочая игра в рекомендуемой структуре
-target/release/spark mygame              # запуск; правишь любой файл — игра перезагружается
-target/release/spark build mygame        # dist/mygame.exe — один файл, всё внутри
+target/release/spark new mygame
 ```
+
+## Быстрый старт
 
 Минимальная игра (`main.luau`):
 
@@ -119,7 +143,12 @@ spark path/to/game [флаги]          запустить игру (папка
 spark new path/to/game               новая игра: main.luau, src/, assets/, game.toml, AGENTS.md, docs/
 spark docs path/to/game              обновить docs/ и AGENTS.md
 spark build path/to/game [--out DIR] [--loose] [--no-zip]
+spark update [VERSION]               поставить последний (или указанный) релиз поверх этого spark.exe
+spark --version
 ```
+
+`spark = "0.1"` в `game.toml` игры — версия движка, под которую она сделана; при другой минорной версии
+(до 1.0) движок предупредит и подскажет, что делать.
 
 Флаги любой игры: `--headless`, `--frames N`, `--screenshot PATH`, `--dump-scene`, `--size WxH`, `--fixed-dt S`,
 `--no-vsync`, `--splash` / `--no-splash`, `--fullscreen`, `--windowed`, `--help`.
@@ -136,7 +165,7 @@ spark build path/to/game [--out DIR] [--loose] [--no-zip]
 | `spark-audio` | звук на kira |
 | `spark-physics` | физика на rapier3d |
 | `spark-script` | Luau API, модули и горячая перезагрузка (`ScriptGame`) |
-| `spark-cli` | исполняемый файл `spark`: run, new, docs, build |
+| `spark-cli` | исполняемый файл `spark`: run, new, docs, build, update |
 
 Соглашения: Y вверх, правая система координат, 1 единица = 1 метр, объекты смотрят вдоль -Z, радианы (FOV в градусах),
 цвета в sRGB.
@@ -146,6 +175,18 @@ spark build path/to/game [--out DIR] [--loose] [--no-zip]
 Ранняя версия (0.1). Основная и протестированная платформа — Windows 10/11 x64; код кроссплатформенный, но сборки
 под Linux и macOS пока не проверялись. API ещё может меняться между версиями — `spark docs` держит документацию
 игры в актуальном состоянии.
+
+## Релизы (для мейнтейнеров)
+
+Поднять `version` в корневом `Cargo.toml`, закоммитить и запушить тег с той же версией:
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+[Release workflow](.github/workflows/release.yml) прогонит тесты, соберёт `spark-windows-x64.zip` и опубликует
+GitHub-релиз, который скачивают `install.ps1` и `spark update`.
 
 ## Лицензия
 

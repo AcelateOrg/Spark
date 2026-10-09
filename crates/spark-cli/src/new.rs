@@ -108,6 +108,7 @@ return Hud
 
 const TOML: &str = r##"# Spark game manifest (all keys optional, see docs/LUAU_API.md).
 title = "{TITLE}"
+spark = "{SPARK}"         # engine version the game is made for
 width = 1280
 height = 720
 # fullscreen = false
@@ -136,7 +137,8 @@ There is no editor - the scene, logic, UI and assets are all described in code.
 - `src/` - one module per system: `local Player = require("./src/player")`, each file returns a table.
   Shared state lives in its own module (e.g. `src/state.luau`). Keep files under ~800 lines.
 - `assets/` - textures, sounds, models (glTF), shaders, fonts. Paths are relative to the game folder.
-- `game.toml` - title, window size, icon, build name.
+- `game.toml` - title, window size, icon, build name, `spark` = the engine version the game is made for.
+  After `spark update` to a new minor version, run `spark docs .`, adapt the code to the new API, then raise `spark`.
 
 ## Check your work (no window needed)
 
@@ -241,11 +243,16 @@ fn create(args: &[String]) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// "0.1" for engine 0.1.3: the API version a new game targets.
+fn engine_minor() -> String {
+    engine::VERSION.split('.').take(2).collect::<Vec<_>>().join(".")
+}
+
 fn write_template(dir: &Path, title: &str) -> Result<(), String> {
     let t = title.replace('"', "'");
     let files: [(&str, String); 6] = [
         ("main.luau", MAIN.replace("{TITLE}", &t)),
-        ("game.toml", TOML.replace("{TITLE}", &t)),
+        ("game.toml", TOML.replace("{TITLE}", &t).replace("{SPARK}", &engine_minor())),
         ("src/level.luau", LEVEL.into()),
         ("src/player.luau", PLAYER.into()),
         ("src/hud.luau", HUD.into()),
@@ -282,7 +289,8 @@ mod tests {
             assert!(dir.join(f).is_file(), "{f}");
         }
         let toml = std::fs::read_to_string(dir.join("game.toml")).unwrap();
-        assert!(crate::manifest::Manifest::parse(&toml).is_ok(), "{toml}");
+        let m = crate::manifest::Manifest::parse(&toml).expect(&toml);
+        assert!(m.version_warning(engine::VERSION).is_none(), "{toml}");
         // The template game runs without errors.
         let mut game = engine::script::ScriptGame::new(dir.join("main.luau")).hot_reload(false);
         let mut world = engine::World::new();

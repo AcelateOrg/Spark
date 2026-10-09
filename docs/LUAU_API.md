@@ -10,6 +10,8 @@ spark new path/to/game        # creates a new game in the recommended layout (se
 spark docs path/to/game       # (re)writes this reference into the game: docs/SPARK_API.md (+ AGENTS.md if missing)
 spark path/to/game            # runs path/to/game/main.luau in a window, hot-reloads on save
 spark game --headless --frames 120 --screenshot shot.png --dump-scene   # no window: check result as PNG + text
+spark update [0.2.0]          # installs the latest (or given) Spark release over this spark.exe
+spark --version
 ```
 
 Flags: `--headless`, `--frames N`, `--screenshot PATH`, `--dump-scene`, `--size WxH`, `--fixed-dt S`,
@@ -20,6 +22,7 @@ In a window F12 saves a screenshot to `screenshots/`, F11 or Alt+Enter toggles f
 
 ```toml
 title = "My Game"        # window title, save folder name, build name (default: folder name)
+spark = "0.1"            # engine version the game is made for (warns when run by an incompatible Spark)
 width = 1280             # window size
 height = 720
 fullscreen = false       # start in borderless fullscreen
@@ -33,6 +36,10 @@ splash = false           # show the "POWERED BY SPARK" splash before start() (de
 ```
 
 Unknown keys are errors (typos do not pass silently).
+
+`spark`: before 1.0 every minor version (0.1 -> 0.2) may change the API, so Spark 0.2 warns on a game made for
+0.1 (and an older Spark warns on a newer game). From 1.0 only the major version has to match. After updating the
+engine: `spark docs .` (new reference), adapt the code, then raise `spark` in game.toml.
 
 ### Sharing a game: spark build
 
