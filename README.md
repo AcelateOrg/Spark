@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AcelateOrg/Spark/actions/workflows/ci.yml"><img src="https://github.com/AcelateOrg/Spark/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/AcelateOrg/Spark/actions/workflows/ci.yml"><img src="https://github.com/AcelateOrg/Spark/actions/workflows/ci.yml/badge.svg" alt="Build"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-blue" alt="License: MPL-2.0"></a>
 </p>
 
@@ -174,15 +174,12 @@ macOS builds are not tested yet. The API can still change between versions - `sp
 
 ## Releases (maintainers)
 
-Bump `version` in the root `Cargo.toml`, commit, then push a tag with the same version:
+Every push to `main` builds `spark.exe` and uploads it as the `spark-windows-x64` artifact of the
+[Build workflow](.github/workflows/ci.yml).
 
-```
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The [release workflow](.github/workflows/release.yml) tests, builds `spark-windows-x64.zip` and publishes the
-GitHub release that `install.ps1` and `spark update` download.
+To release: bump `version` in the root `Cargo.toml`, push, then create a release on GitHub (Releases > Draft a new
+release, tag `v0.1.0`). The [release workflow](.github/workflows/release.yml) builds `spark-windows-x64.zip` and
+attaches it to the release (a few minutes); `install.ps1` and `spark update` download it from there.
 
 ## License
 

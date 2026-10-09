@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AcelateOrg/Spark/actions/workflows/ci.yml"><img src="https://github.com/AcelateOrg/Spark/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/AcelateOrg/Spark/actions/workflows/ci.yml"><img src="https://github.com/AcelateOrg/Spark/actions/workflows/ci.yml/badge.svg" alt="Build"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-blue" alt="License: MPL-2.0"></a>
 </p>
 
@@ -178,15 +178,12 @@ spark --version
 
 ## Релизы (для мейнтейнеров)
 
-Поднять `version` в корневом `Cargo.toml`, закоммитить и запушить тег с той же версией:
+Каждый пуш в `main` собирает `spark.exe` и кладёт его артефактом `spark-windows-x64` в
+[Build workflow](.github/workflows/ci.yml).
 
-```
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-[Release workflow](.github/workflows/release.yml) прогонит тесты, соберёт `spark-windows-x64.zip` и опубликует
-GitHub-релиз, который скачивают `install.ps1` и `spark update`.
+Релиз: поднять `version` в корневом `Cargo.toml`, запушить и создать релиз на GitHub (Releases > Draft a new release,
+тег `v0.1.0`). [Release workflow](.github/workflows/release.yml) соберёт `spark-windows-x64.zip` и прикрепит его
+к релизу (пара минут); оттуда его и качают `install.ps1` и `spark update`.
 
 ## Лицензия
 
