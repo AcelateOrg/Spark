@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+*.pdb
+dist/
+screenshots/
+error.log
+spark-crash.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

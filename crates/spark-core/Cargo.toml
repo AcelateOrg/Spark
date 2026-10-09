@@ -1,0 +1,20 @@
+[package]
+name = "spark-core"
+description = "Core: world data, scene, math, input, time."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+glam.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+image.workspace = true
+fontdue = "0.9.4"
+miniz_oxide = "0.8"
+naga = { version = "30", features = ["wgsl-in"] }
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "KHR_materials_unlit"] }

@@ -1,0 +1,17 @@
+[package]
+name = "spark-render"
+description = "Rendering: wgpu backend, meshes, materials, custom WGSL shaders, post passes, screenshots."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+spark-core.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+log.workspace = true

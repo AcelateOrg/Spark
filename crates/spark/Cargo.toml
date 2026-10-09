@@ -1,0 +1,23 @@
+[package]
+name = "spark"
+description = "Spark Engine: code-first game engine library."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+spark-core.workspace = true
+spark-window.workspace = true
+spark-render.workspace = true
+spark-audio.workspace = true
+spark-physics.workspace = true
+spark-script.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Foundation"] }

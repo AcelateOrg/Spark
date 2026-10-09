@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "examples/hello"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MPL-2.0"
+authors = ["Acelate"]
+homepage = "https://acelate.com/spark"
+repository = "https://github.com/AcelateOrg/Spark"
+keywords = ["gamedev", "engine", "luau", "wgpu", "ai"]
+categories = ["game-engines"]
+
+[workspace.dependencies]
+spark = { path = "crates/spark" }
+spark-core = { path = "crates/spark-core" }
+spark-window = { path = "crates/spark-window" }
+spark-render = { path = "crates/spark-render" }
+spark-audio = { path = "crates/spark-audio" }
+spark-physics = { path = "crates/spark-physics" }
+spark-script = { path = "crates/spark-script" }
+
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+mlua = { version = "0.12", features = ["luau"] }
+rapier3d = "0.36"
+kira = "0.12"
+gilrs = "0.11"
+
+# Fast debug builds: our code lightly optimized, dependencies fully optimized.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

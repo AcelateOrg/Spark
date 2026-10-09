@@ -1,0 +1,21 @@
+[package]
+name = "spark-cli"
+description = "Spark Engine runner: spark path/to/main.luau"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "spark"
+path = "src/main.rs"
+
+[features]
+# Release builds for players: no console window on Windows (`cargo build --release -p spark-cli --features gui`).
+gui = []
+
+[dependencies]
+engine = { package = "spark", path = "../spark" }

@@ -1,0 +1,3 @@
+# Static CRT on Windows: Spark executables run on any PC without the VC++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
