@@ -7,7 +7,12 @@ struct Object {
     info: vec4<f32>,   // tiling x, tiling y, unlit (0 / 1), -
 };
 
-@group(1) @binding(0) var<uniform> object: Object;
+// Per-object data of every drawn object (instanced draws). `object` = the one being drawn.
+@group(1) @binding(0) var<uniform> spark_objects: array<Object, 64>;
+var<private> object: Object;
+// Sun shadow map (see `sun_shadow`).
+@group(0) @binding(1) var spark_shadow_map: texture_depth_2d;
+@group(0) @binding(2) var spark_shadow_sampler: sampler_comparison;
 @group(2) @binding(0) var base_texture: texture_2d<f32>;
 @group(2) @binding(1) var base_sampler: sampler;
 @group(3) @binding(0) var<uniform> params: Params;
@@ -29,6 +34,7 @@ struct Fragment {
     @location(1) normal: vec3<f32>,       // world space, not normalized
     @location(2) uv: vec2<f32>,           // already multiplied by the material tiling
     @location(3) custom: vec4<f32>,       // free for your shader (0 by default)
+    @location(4) @interpolate(flat) spark_instance: u32,  // engine-managed, leave as is
 };
 
 fn default_vertex(v: VertexInput) -> Fragment {
@@ -47,10 +53,37 @@ fn surface_color(uv: vec2<f32>) -> vec4<f32> {
     return object.color * textureSample(base_texture, base_sampler, uv);
 }
 
-// Light arriving at a point: ambient + sun + point / spot lights (linear rgb).
+// How much sun reaches a point: 1 = lit, 0 = in shadow (3x3 PCF, fades out at the shadow distance).
+fn sun_shadow(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+    if (frame.shadow.x < 0.5) {
+        return 1.0;
+    }
+    let n = normalize(normal);
+    let p = frame.shadow_view_proj * vec4<f32>(world_pos + n * frame.shadow.z, 1.0);
+    let c = p.xyz / p.w;
+    let uv = vec2<f32>(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5);
+    if (uv.x <= 0.0 || uv.y <= 0.0 || uv.x >= 1.0 || uv.y >= 1.0 || c.z >= 1.0) {
+        return 1.0;
+    }
+    var sum = 0.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let o = vec2<f32>(f32(x), f32(y)) * frame.shadow.y;
+            sum = sum + textureSampleCompareLevel(spark_shadow_map, spark_shadow_sampler, uv + o, c.z - 0.0003);
+        }
+    }
+    let fade = smoothstep(frame.shadow.w * 0.8, frame.shadow.w, distance(world_pos, frame.camera_pos.xyz));
+    return mix(sum / 9.0, 1.0, fade);
+}
+
+// Light arriving at a point: ambient + sun (with shadows) + point / spot lights (linear rgb).
 fn lighting(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let n = normalize(normal);
-    var light = frame.ambient.rgb + frame.sun_color.rgb * max(dot(n, normalize(-frame.sun_dir.xyz)), 0.0);
+    let sun = max(dot(n, normalize(-frame.sun_dir.xyz)), 0.0);
+    var light = frame.ambient.rgb;
+    if (sun > 0.0) {
+        light = light + frame.sun_color.rgb * sun * sun_shadow(world_pos, n);
+    }
     for (var i = 0u; i < frame.light_count.x; i = i + 1u) {
         let li = frame.lights[i];
         let to_light = li.position.xyz - world_pos;
@@ -93,11 +126,15 @@ fn default_fragment(f: Fragment) -> vec4<f32> {
 }
 
 @vertex
-fn spark_vs(v: VertexInput) -> Fragment {
-    return SPARK_VERTEX(v);
+fn spark_vs(v: VertexInput, @builtin(instance_index) spark_ii: u32) -> Fragment {
+    object = spark_objects[spark_ii];
+    var f = SPARK_VERTEX(v);
+    f.spark_instance = spark_ii;
+    return f;
 }
 
 @fragment
 fn spark_fs(f: Fragment) -> @location(0) vec4<f32> {
+    object = spark_objects[f.spark_instance];
     return SPARK_FRAGMENT(f);
 }

@@ -59,11 +59,30 @@ pub struct RenderSettings {
     pub shader: Option<ShaderId>,
     /// Post passes, run in order.
     pub post: Vec<PostPass>,
+    /// Multisample anti-aliasing of the 3D scene: 1 (off), 2, 4 or 8 (falls back to what the GPU supports).
+    pub msaa: u32,
+    /// Sun shadows (shadow map around the camera).
+    pub shadows: bool,
+    /// How far from the camera shadows are drawn, meters.
+    pub shadow_distance: f32,
+    /// Shadow map resolution in pixels (square).
+    pub shadow_size: u32,
 }
 
 impl Default for RenderSettings {
     fn default() -> Self {
-        Self { height: None, scale: 1.0, upscale: TextureFilter::Linear, filter: TextureFilter::Linear, shader: None, post: Vec::new() }
+        Self {
+            height: None,
+            scale: 1.0,
+            upscale: TextureFilter::Linear,
+            filter: TextureFilter::Linear,
+            shader: None,
+            post: Vec::new(),
+            msaa: 4,
+            shadows: true,
+            shadow_distance: 40.0,
+            shadow_size: 2048,
+        }
     }
 }
 

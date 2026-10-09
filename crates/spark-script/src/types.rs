@@ -36,7 +36,8 @@ pub(crate) fn set_parent(w: &mut World, id: ObjectId, parent: Option<ObjectId>) 
     w.scene.set_parent(id, parent).map_err(rt)
 }
 
-const PROPS: &str = "name, position, rotation, scale, visible, parent, color, shader, data, body, light";
+const PROPS: &str =
+    "name, position, rotation, scale, visible, parent, color, shader, data, body, light, blend, double_sided, cast_shadow";
 
 /// `material.data`: up to 4 numbers, a vector or {x, y, z, w}.
 pub(crate) fn to_data(args: &[Value], what: &str) -> LuaResult<[f32; 4]> {
@@ -96,6 +97,9 @@ pub(crate) fn apply_props(w: &mut World, id: ObjectId, props: Option<Table>) -> 
             "color" => w.scene[id].material.color = to_color(&v, &what)?,
             "shader" => w.scene[id].material.shader = crate::shader::to_shader(&v, &what)?,
             "data" => w.scene[id].material.data = to_data(&[v], &what)?,
+            "blend" => w.scene[id].material.blend = to_blend(&v, &what)?,
+            "double_sided" => w.scene[id].material.double_sided = to_bool(&v, &what)?,
+            "cast_shadow" => w.scene[id].material.cast_shadow = to_bool(&v, &what)?,
             "parent" => set_parent(w, id, to_parent(&v, &what)?)?,
             "body" => w.scene[id].body = Some(crate::physics::to_body(&v, &what)?),
             "light" => w.scene[id].light = Some(crate::light::to_light(&v, &what)?),
@@ -142,6 +146,15 @@ impl UserData for Obj {
             write(lua, this.0, |o| o.material.color = c)
         });
         f.add_field_method_get("material", |lua, this| read(lua, this.0, |_, o| LuaMaterial(o.material)));
+        f.add_field_method_get("blend", |lua, this| read(lua, this.0, |_, o| o.material.blend.name()));
+        f.add_field_method_set("blend", |lua, this, v: Value| {
+            let b = to_blend(&v, "blend")?;
+            write(lua, this.0, |o| o.material.blend = b)
+        });
+        f.add_field_method_get("double_sided", |lua, this| read(lua, this.0, |_, o| o.material.double_sided));
+        f.add_field_method_set("double_sided", |lua, this, v: bool| write(lua, this.0, |o| o.material.double_sided = v));
+        f.add_field_method_get("cast_shadow", |lua, this| read(lua, this.0, |_, o| o.material.cast_shadow));
+        f.add_field_method_set("cast_shadow", |lua, this, v: bool| write(lua, this.0, |o| o.material.cast_shadow = v));
         f.add_field_method_get("shader", |lua, this| read(lua, this.0, |_, o| o.material.shader.map(crate::shader::LuaShader)));
         f.add_field_method_set("shader", |lua, this, v: Value| {
             let s = crate::shader::to_shader(&v, "shader")?;
@@ -315,10 +328,22 @@ impl UserData for LuaMaterial {
         f.add_field_method_get("texture", |_, this| Ok(this.0.texture.map(LuaTexture)));
         f.add_field_method_get("shader", |_, this| Ok(this.0.shader.map(crate::shader::LuaShader)));
         f.add_field_method_get("data", |lua, this| data_table(lua, this.0.data));
+        f.add_field_method_get("blend", |_, this| Ok(this.0.blend.name()));
+        f.add_field_method_get("double_sided", |_, this| Ok(this.0.double_sided));
+        f.add_field_method_get("cast_shadow", |_, this| Ok(this.0.cast_shadow));
     }
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
         m.add_method("tiling", |_, this, (x, y): (f32, Option<f32>)| Ok(LuaMaterial(this.0.with_tiling(x, y.unwrap_or(x)))));
         m.add_method("with_color", |_, this, c: Value| Ok(LuaMaterial(this.0.with_color(to_color(&c, "with_color")?))));
+        m.add_method("with_blend", |_, this, v: Value| Ok(LuaMaterial(this.0.with_blend(to_blend(&v, "with_blend")?))));
+        m.add_method("with_double_sided", |_, this, on: Option<bool>| {
+            Ok(LuaMaterial(this.0.with_double_sided(on.unwrap_or(true))))
+        });
+        m.add_method("with_cast_shadow", |_, this, on: Option<bool>| {
+            let mut m = this.0;
+            m.cast_shadow = on.unwrap_or(true);
+            Ok(LuaMaterial(m))
+        });
         m.add_method("with_unlit", |_, this, on: Option<bool>| Ok(LuaMaterial(this.0.with_unlit(on.unwrap_or(true)))));
         m.add_method("with_shader", |_, this, s: Value| {
             Ok(LuaMaterial(this.0.with_shader(crate::shader::to_shader(&s, "with_shader")?)))
@@ -362,6 +387,15 @@ impl UserData for Cam {
         f.add_field_method_set("near", |lua, _, v: f32| with(lua, |w| Ok(w.scene.camera.near = v)));
         f.add_field_method_get("far", |lua, _| with(lua, |w| Ok(w.scene.camera.far)));
         f.add_field_method_set("far", |lua, _, v: f32| with(lua, |w| Ok(w.scene.camera.far = v)));
+        // nil / false = perspective, a number = orthographic with that many meters visible vertically.
+        f.add_field_method_get("ortho", |lua, _| with(lua, |w| Ok(w.scene.camera.ortho)));
+        f.add_field_method_set("ortho", |lua, _, v: Value| {
+            let o = match v {
+                Value::Nil | Value::Boolean(false) => None,
+                _ => Some(to_num(&v, "camera.ortho")?.max(0.001)),
+            };
+            with(lua, |w| Ok(w.scene.camera.ortho = o))
+        });
     }
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
         m.add_method("look_at", |lua, _, target: Value| {
@@ -376,6 +410,28 @@ impl UserData for Cam {
             with(lua, |w| Ok(w.scene.camera.position += d))
         });
         m.add_method("forward", |lua, _, ()| with(lua, |w| Ok(vv(w.scene.camera.forward()))));
+        // World point -> screen pixel (x, y, depth 0..1) or nil when behind the camera.
+        m.add_method("world_to_screen", |lua, _, p: Value| {
+            with(lua, |w| {
+                let p = to_point(w, &p, "camera:world_to_screen")?;
+                let (sw, sh) = w.canvas.output_size();
+                Ok(w.scene
+                    .camera
+                    .world_to_screen(p, spark_core::Vec2::new(sw as f32, sh as f32))
+                    .map(|(px, d)| mlua::Variadic::from_iter([px.x, px.y, d]))
+                    .unwrap_or_default())
+            })
+        });
+        // Screen pixel (default: the mouse) -> origin, direction of a world ray.
+        m.add_method("screen_to_ray", |lua, _, (x, y): (Option<f32>, Option<f32>)| {
+            with(lua, |w| {
+                let (sw, sh) = w.canvas.output_size();
+                let m = w.input.mouse_position;
+                let px = spark_core::Vec2::new(x.unwrap_or(m.x), y.unwrap_or(m.y));
+                let (o, d) = w.scene.camera.screen_to_ray(px, spark_core::Vec2::new(sw as f32, sh as f32));
+                Ok((vv(o), vv(d)))
+            })
+        });
         m.add_method("right", |lua, _, ()| with(lua, |w| Ok(vv(w.scene.camera.right()))));
         m.add_method("up", |lua, _, ()| with(lua, |w| Ok(vv(w.scene.camera.up()))));
         m.add_meta_method(MetaMethod::ToString, |lua, _, ()| {
@@ -413,4 +469,10 @@ impl UserData for TimeRef {
         f.add_field_method_get("frame", |lua, _| with(lua, |w| Ok(w.time.frame)));
         f.add_field_method_get("fps", |lua, _| with(lua, |w| Ok(w.time.fps)));
     }
+}
+
+pub(crate) fn to_blend(v: &Value, what: &str) -> LuaResult<spark_core::material::BlendMode> {
+    let s = to_str(v, what)?;
+    spark_core::material::BlendMode::parse(&s)
+        .ok_or_else(|| rt(format!("{what}: unknown blend mode '{s}' (allowed: auto, opaque, alpha, additive)")))
 }

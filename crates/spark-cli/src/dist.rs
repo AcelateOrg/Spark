@@ -1,9 +1,13 @@
 //! `spark build path/to/game [--out DIR] [--loose] [--no-zip]`: a build that players double-click.
 //!
-//! Default: ONE executable. It is a copy of the running `spark` binary with the Windows subsystem
-//! switched to GUI (no console window) and every game file (scripts, textures, sounds, models,
+//! Default: ONE executable (`<Name>.exe` on Windows, `<Name>` with the executable bit on Linux / macOS).
+//! It is a copy of the running `spark` binary (on Windows with the subsystem
+//! switched to GUI: no console window) and every game file (scripts, textures, sounds, models,
 //! shaders, fonts, game.toml) packed at its end (see `engine::vfs`). Nothing else is needed next to it.
 //! `--loose`: the old layout - the exe plus the game files in a folder (easy to mod).
+//! `--app` (macOS): also wraps the executable in `<Name>.app` (Info.plist) so Finder starts it with a double-click.
+//!
+//! Archive: `.zip` on Windows / macOS (bsdtar), `.tar.gz` on Linux (keeps the executable bit).
 
 use std::path::{Path, PathBuf};
 
@@ -30,12 +34,14 @@ fn build(args: &[String]) -> Result<(), String> {
     let mut out: Option<PathBuf> = None;
     let mut zip = true;
     let mut loose = false;
+    let mut app = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--out" => out = Some(PathBuf::from(it.next().ok_or("--out needs a folder")?)),
             "--no-zip" => zip = false,
             "--loose" => loose = true,
+            "--app" => app = true,
             "--help" | "-h" => {
                 println!("{}", crate::USAGE);
                 return Ok(());
@@ -58,7 +64,7 @@ fn build(args: &[String]) -> Result<(), String> {
     let exe_name = if cfg!(windows) { format!("{name}.exe") } else { name.clone() };
 
     // The player executable: this binary without any old pack, console hidden.
-    let me = std::env::current_exe().map_err(|e| format!("cannot find spark.exe: {e}"))?;
+    let me = std::env::current_exe().map_err(|e| format!("cannot find the spark executable: {e}"))?;
     let raw = std::fs::read(&me).map_err(|e| format!("cannot read '{}': {e}", me.display()))?;
     let mut exe = strip_pack(&raw).to_vec();
     if cfg!(windows) && !set_gui_subsystem(&mut exe) {
@@ -69,9 +75,12 @@ fn build(args: &[String]) -> Result<(), String> {
     collect(&dir, &dir, &m, &mut files)?;
 
     // What gets zipped (relative to out_root).
-    let shipped: PathBuf;
-    if loose {
+    let mut shipped = if loose {
         let target = out_root.join(&name);
+        // Linux / macOS: a previous one-file build has exactly this name.
+        if target.is_file() {
+            std::fs::remove_file(&target).map_err(|e| format!("cannot replace '{}': {e} (is the game still running?)", target.display()))?;
+        }
         if target.exists() {
             std::fs::remove_dir_all(&target).map_err(|e| format!("cannot clear '{}': {e} (is the game still running?)", target.display()))?;
         }
@@ -86,7 +95,7 @@ fn build(args: &[String]) -> Result<(), String> {
             bytes += std::fs::copy(dir.join(rel), &dest).map_err(|e| format!("cannot copy '{}': {e}", rel.display()))?;
         }
         println!("spark build: {} -> {} ({} files, {:.1} MB + exe)", dir.display(), target.display(), files.len(), bytes as f64 / 1e6);
-        shipped = PathBuf::from(&name);
+        PathBuf::from(&name)
     } else {
         let mut pack = PackWriter::new();
         for rel in &files {
@@ -97,6 +106,10 @@ fn build(args: &[String]) -> Result<(), String> {
         let base = exe.len();
         let full = pack.finish(&exe);
         let path = out_root.join(&exe_name);
+        // Linux / macOS: a previous --loose build is a folder with exactly this name.
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| format!("cannot replace '{}': {e} (is the game still running?)", path.display()))?;
+        }
         write_exe(&path, &full)?;
         println!(
             "spark build: {} -> {} ({count} files, {:.1} MB packed into {:.1} MB, engine {:.1} MB)",
@@ -106,28 +119,40 @@ fn build(args: &[String]) -> Result<(), String> {
             (full.len() - base) as f64 / 1e6,
             base as f64 / 1e6
         );
-        shipped = PathBuf::from(&exe_name);
+        PathBuf::from(&exe_name)
+    };
+
+    if app {
+        if cfg!(target_os = "macos") {
+            let bundle = make_app_bundle(&out_root, &name, &shipped, &title, loose)?;
+            println!("spark build: {}", bundle.display());
+            shipped = PathBuf::from(format!("{name}.app"));
+        } else {
+            eprintln!("spark build: warning: --app makes a macOS .app bundle; ignored on this OS");
+        }
     }
 
-    // Zip (Windows 10+ and macOS ship bsdtar, which writes zip files). Browsers and chats often
-    // block a bare .exe download, a zip passes.
+    // Browsers and chats often block a bare executable download, an archive passes.
+    // Windows 10+ and macOS ship bsdtar, which writes zip files. GNU tar (Linux) can't: .tar.gz there
+    // (it also keeps the executable bit, which zip files extracted by many tools lose).
     if zip {
-        let zip_path = out_root.join(format!("{name}.zip"));
-        let _ = std::fs::remove_file(&zip_path);
-        let status = std::process::Command::new("tar")
-            .arg("-a")
-            .arg("-c")
-            .arg("-f")
-            .arg(format!("{name}.zip"))
-            .arg(&shipped)
-            .current_dir(&out_root)
-            .status();
+        let linux = !cfg!(any(windows, target_os = "macos"));
+        let archive = if linux { format!("{name}.tar.gz") } else { format!("{name}.zip") };
+        let archive_path = out_root.join(&archive);
+        let _ = std::fs::remove_file(&archive_path);
+        let mut cmd = std::process::Command::new("tar");
+        if linux {
+            cmd.arg("-czf");
+        } else {
+            cmd.arg("-a").arg("-c").arg("-f");
+        }
+        let status = cmd.arg(&archive).arg(&shipped).current_dir(&out_root).status();
         match status {
-            Ok(s) if s.success() && zip_path.is_file() => {
-                let size = std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
-                println!("spark build: {} ({:.1} MB)", zip_path.display(), size as f64 / 1e6);
+            Ok(s) if s.success() && archive_path.is_file() => {
+                let size = std::fs::metadata(&archive_path).map(|m| m.len()).unwrap_or(0);
+                println!("spark build: {} ({:.1} MB)", archive_path.display(), size as f64 / 1e6);
             }
-            _ => eprintln!("spark build: warning: could not create the zip (zip it by hand)"),
+            _ => eprintln!("spark build: warning: could not create {archive} ('tar' missing?) - archive {} by hand", shipped.display()),
         }
     }
     println!("spark build: done. Players run {exe_name}");
@@ -142,6 +167,58 @@ fn write_exe(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
     }
     Ok(())
+}
+
+/// `<name>.app/Contents/{Info.plist, MacOS/<name>}` around the built executable (or loose folder).
+fn make_app_bundle(out_root: &Path, name: &str, shipped: &Path, title: &str, loose: bool) -> Result<PathBuf, String> {
+    let bundle = out_root.join(format!("{name}.app"));
+    if bundle.exists() {
+        std::fs::remove_dir_all(&bundle).map_err(|e| format!("cannot clear '{}': {e}", bundle.display()))?;
+    }
+    let macos = bundle.join("Contents/MacOS");
+    std::fs::create_dir_all(&macos).map_err(|e| format!("cannot create '{}': {e}", macos.display()))?;
+    let src = out_root.join(shipped);
+    if loose {
+        // The whole folder (exe + game files) lives in Contents/MacOS.
+        for entry in std::fs::read_dir(&src).map_err(|e| format!("cannot read '{}': {e}", src.display()))?.flatten() {
+            let to = macos.join(entry.file_name());
+            std::fs::rename(entry.path(), &to).map_err(|e| format!("cannot move into the bundle: {e}"))?;
+        }
+        let _ = std::fs::remove_dir(&src);
+    } else {
+        std::fs::rename(&src, macos.join(name)).map_err(|e| format!("cannot move into the bundle: {e}"))?;
+    }
+    write_file(&bundle.join("Contents/Info.plist"), info_plist(name, title).as_bytes())?;
+    Ok(bundle)
+}
+
+fn info_plist(name: &str, title: &str) -> String {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let id: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>{title}</string>
+  <key>CFBundleDisplayName</key><string>{title}</string>
+  <key>CFBundleExecutable</key><string>{exe}</string>
+  <key>CFBundleIdentifier</key><string>com.sparkgames.{id}</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+</dict>
+</plist>
+"#,
+        title = esc(title),
+        exe = esc(name),
+    )
+}
+
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(path, bytes).map_err(|e| format!("cannot write '{}': {e}", path.display()))
 }
 
 /// A safe file name from a title (keeps Unicode letters).
@@ -240,5 +317,13 @@ mod tests {
         assert!(set_gui_subsystem(&mut exe));
         assert_eq!(exe[0x80 + 92], 2);
         assert!(!set_gui_subsystem(&mut [0u8; 10]));
+    }
+
+    #[test]
+    fn plist_is_escaped() {
+        let p = info_plist("My_Game", "A <b> & c");
+        assert!(p.contains("<string>A &lt;b&gt; &amp; c</string>"));
+        assert!(p.contains("<key>CFBundleExecutable</key><string>My_Game</string>"));
+        assert!(p.contains("com.sparkgames.my-game"));
     }
 }

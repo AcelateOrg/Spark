@@ -45,7 +45,7 @@ fn pose(pos: Vec3, rot: Quat) -> rp::Pose {
 }
 
 /// Everything that requires rebuilding the collider when it changes.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct ColliderKey {
     shape: Shape,
     mesh: Option<MeshId>,
@@ -54,6 +54,21 @@ struct ColliderKey {
     friction: f32,
     bounciness: f32,
     sensor: bool,
+}
+
+impl PartialEq for ColliderKey {
+    fn eq(&self, o: &Self) -> bool {
+        // Scale comes out of a matrix decomposition: float noise (rotating parents, interpolation)
+        // must not rebuild the collider every step. Only real scale changes (> 0.01 %) count.
+        let scale_same = (self.scale - o.scale).abs().cmple(self.scale.abs().max(Vec3::splat(1e-3)) * 1e-4).all();
+        scale_same
+            && self.shape == o.shape
+            && self.mesh == o.mesh
+            && self.mass == o.mass
+            && self.friction == o.friction
+            && self.bounciness == o.bounciness
+            && self.sensor == o.sensor
+    }
 }
 
 /// Body settings applied with setters when they change.
@@ -168,6 +183,11 @@ impl RapierBackend {
         for id in ids {
             let (scale, rot, pos) = world.scene.world_matrix(id).to_scale_rotation_translation();
             let o = &world.scene[id];
+            // Keep the previous scale when it only differs by float noise.
+            let scale = match self.entries.get(&id) {
+                Some(e) if (e.key.scale - scale).abs().cmple(e.key.scale.abs().max(Vec3::splat(1e-3)) * 1e-4).all() => e.key.scale,
+                _ => scale,
+            };
             let body = o.body.as_ref().expect("filtered");
             let key = ColliderKey {
                 shape: body.shape,

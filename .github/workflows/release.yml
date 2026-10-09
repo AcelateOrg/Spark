@@ -1,32 +1,74 @@
-# Create a release on GitHub (Releases > Draft a new release, tag v0.1.0) - this attaches spark-windows-x64.zip to it.
+# Create a release on GitHub (Releases > Draft a new release, tag v0.1.0): this builds spark on Windows, Linux and
+# macOS and attaches spark-windows-x64.zip, spark-linux-x64.tar.gz and spark-macos-arm64.tar.gz to it.
+# The asset names are what install.ps1, install.sh and `spark update` download - keep them in sync.
+# Run it by hand (Actions > Release > Run workflow) to only build the archives as workflow artifacts.
 name: Release
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    name: ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, exe: spark.exe, asset: spark-windows-x64.zip }
+          - { os: ubuntu-latest, exe: spark, asset: spark-linux-x64.tar.gz }
+          - { os: macos-latest, exe: spark, asset: spark-macos-arm64.tar.gz }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libdbus-1-dev pkg-config
+
       - name: Build
         run: cargo build --release -p spark-cli
 
-      - name: Package
+      - name: Package (zip)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/spark.exe, LICENSE, README.md dist/
-          Compress-Archive -Path dist/* -DestinationPath spark-windows-x64.zip -Force
+          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.asset }} -Force
+
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/spark LICENSE README.md install.sh dist/
+          chmod +x dist/spark dist/install.sh
+          tar -czf ${{ matrix.asset }} -C dist .
+
+      - name: Smoke test
+        shell: bash
+        run: dist/${{ matrix.exe }} --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
 
       - name: Attach to release
+        if: github.event_name == 'release'
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload ${{ github.event.release.tag_name }} spark-windows-x64.zip --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.asset }}" --clobber

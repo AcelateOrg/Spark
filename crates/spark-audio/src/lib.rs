@@ -18,6 +18,9 @@ use kira::track::{TrackBuilder, TrackHandle};
 use kira::{AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Panning, PlaybackRate, Tween};
 use spark_core::{AudioBackend, AudioCommand, BusId, PlayParams, SoundId};
 
+/// Distinct decoded sound files kept in memory before the cache is flushed.
+const MAX_CACHED_SOUNDS: usize = 256;
+
 /// Linear volume (0..) to decibels.
 fn db(volume: f32) -> Decibels {
     if volume <= 0.001 { Decibels::SILENCE } else { Decibels((20.0 * volume.log10()).max(-60.0)) }
@@ -30,7 +33,8 @@ fn tween(seconds: f32) -> Tween {
 /// Plays sounds through the default output device.
 pub struct KiraBackend {
     manager: AudioManager<DefaultBackend>,
-    cache: HashMap<PathBuf, Option<StaticSoundData>>,
+    /// Decoded sounds by path, with the file's modification time when decoded.
+    cache: HashMap<PathBuf, (Option<std::time::SystemTime>, Option<StaticSoundData>)>,
     sounds: HashMap<SoundId, (StaticSoundHandle, Option<BusId>)>,
     /// One kira sub-track per bus, created on first use.
     buses: HashMap<BusId, TrackHandle>,
@@ -49,18 +53,29 @@ impl KiraBackend {
     }
 
     fn load(&mut self, path: &Path) -> Option<StaticSoundData> {
-        self.cache
-            .entry(path.to_path_buf())
-            .or_insert_with(|| match spark_core::vfs::read(path).map_err(|e| e.to_string()).and_then(|b| {
-                StaticSoundData::from_cursor(std::io::Cursor::new(b)).map_err(|e| e.to_string())
-            }) {
-                Ok(data) => Some(data),
-                Err(e) => {
-                    log::error!("can't load sound {}: {e}", path.display());
-                    None
-                }
-            })
-            .clone()
+        // A changed file (edited while the game runs) is decoded again; packed games have no mtime.
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if let Some((t, data)) = self.cache.get(path) {
+            if *t == mtime {
+                return data.clone();
+            }
+        }
+        if self.cache.len() >= MAX_CACHED_SOUNDS {
+            // Bound memory: flush the whole cache (rare; playing sounds keep their own data).
+            self.cache.clear();
+        }
+        let data = match spark_core::vfs::read(path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| StaticSoundData::from_cursor(std::io::Cursor::new(b)).map_err(|e| e.to_string()))
+        {
+            Ok(data) => Some(data),
+            Err(e) => {
+                log::error!("can't load sound {}: {e}", path.display());
+                None
+            }
+        };
+        self.cache.insert(path.to_path_buf(), (mtime, data.clone()));
+        data
     }
 
     fn play(&mut self, id: SoundId, path: &Path, p: PlayParams) {
@@ -154,6 +169,7 @@ impl AudioBackend for KiraBackend {
                         if paused { t.pause(tween(fade)) } else { t.resume(tween(fade)) }
                     }
                 }
+                AudioCommand::ClearCache => self.cache.clear(),
                 AudioCommand::MasterVolume { volume } => {
                     self.manager.main_track().set_volume(db(volume), tween(0.0));
                 }

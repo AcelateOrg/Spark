@@ -44,14 +44,15 @@ fn surface_opts(t: Option<Table>, what: &str) -> LuaResult<Option<SurfaceOpts>> 
 fn keys(name: &str) -> LuaResult<Vec<Key>> {
     Key::resolve(name).ok_or_else(|| {
         rt(format!(
-            "unknown key '{name}' (keys: a-z, 0-9, space, enter, escape, tab, backspace, left, right, up, down, shift, ctrl, alt, f1-f12)"
+            "unknown key '{name}' (keys: a-z, 0-9, punctuation like minus comma slash or \"-\" \",\" \"/\", numpad0-9, f1-f24, all names: {})",
+            Key::names()
         ))
     })
 }
 
 fn button(name: Option<String>) -> LuaResult<MouseButton> {
     let name = name.unwrap_or_else(|| "left".into());
-    MouseButton::from_name(&name).ok_or_else(|| rt(format!("unknown mouse button '{name}' (use \"left\", \"right\", \"middle\")")))
+    MouseButton::from_name(&name).ok_or_else(|| rt(format!("unknown mouse button '{name}' (use \"left\", \"right\", \"middle\", \"back\", \"forward\")")))
 }
 
 fn pad_button(name: &str) -> LuaResult<PadButton> {
@@ -400,6 +401,8 @@ fn install_input(lua: &Lua, g: &Table) -> LuaResult<()> {
     input.set("down", lua.create_function(|lua, n: String| { let ks = keys(&n)?; with(lua, |w| Ok(ks.iter().any(|k| w.input.down(*k)))) })?)?;
     input.set("pressed", lua.create_function(|lua, n: String| { let ks = keys(&n)?; with(lua, |w| Ok(ks.iter().any(|k| w.input.pressed(*k)))) })?)?;
     input.set("released", lua.create_function(|lua, n: String| { let ks = keys(&n)?; with(lua, |w| Ok(ks.iter().any(|k| w.input.released(*k)))) })?)?;
+    input.set("repeated", lua.create_function(|lua, n: String| { let ks = keys(&n)?; with(lua, |w| Ok(ks.iter().any(|k| w.input.repeated(*k)))) })?)?;
+    input.set("text", lua.create_function(|lua, ()| with(lua, |w| Ok(w.input.text.clone())))?)?;
     input.set("mouse_down", lua.create_function(|lua, b: Option<String>| { let b = button(b)?; with(lua, |w| Ok(w.input.mouse_down(b))) })?)?;
     input.set("mouse_pressed", lua.create_function(|lua, b: Option<String>| { let b = button(b)?; with(lua, |w| Ok(w.input.mouse_pressed(b))) })?)?;
     input.set("mouse_released", lua.create_function(|lua, b: Option<String>| { let b = button(b)?; with(lua, |w| Ok(w.input.mouse_released(b))) })?)?;

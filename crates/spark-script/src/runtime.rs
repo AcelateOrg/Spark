@@ -228,10 +228,10 @@ pub(crate) fn begin_frame(lua: &Lua, dt: f64) -> LuaResult<()> {
     let (pressed, released, mouse_down, mouse_up, wheel, mouse) = with(lua, |w| {
         let i = &w.input;
         let names = |f: &dyn Fn(Key) -> bool| Key::ALL.iter().filter(|k| f(**k)).map(|k| k.name()).collect::<Vec<_>>();
-        let buttons = [("left", MouseButton::Left), ("right", MouseButton::Right), ("middle", MouseButton::Middle)];
-        let down = buttons.iter().filter(|(_, b)| i.mouse_pressed(*b)).map(|(n, _)| *n).collect::<Vec<_>>();
-        let up = buttons.iter().filter(|(_, b)| i.mouse_released(*b)).map(|(n, _)| *n).collect::<Vec<_>>();
-        Ok((names(&|k| i.pressed(k)), names(&|k| i.released(k)), down, up, i.wheel, i.mouse_position))
+        // Frame view: events fire once per frame even when the frame starts inside fixed_update.
+        let down = MouseButton::ALL.iter().filter(|b| i.frame_mouse_pressed(**b)).map(|b| b.name()).collect::<Vec<_>>();
+        let up = MouseButton::ALL.iter().filter(|b| i.frame_mouse_released(**b)).map(|b| b.name()).collect::<Vec<_>>();
+        Ok((names(&|k| i.frame_pressed(k)), names(&|k| i.frame_released(k)), down, up, i.wheel, i.mouse_position))
     })?;
     let has = |n: &str| -> LuaResult<bool> { Ok(runtime(lua)?.borrow().bus.listener_count(n) > 0) };
     if has("key_pressed")? {

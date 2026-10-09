@@ -19,6 +19,12 @@ Spark Engine flags:
   --frames N            run N frames, then exit (default 1 in headless mode)
   --screenshot PATH     save the final frame as PNG (use with --frames)
   --dump-scene          print all objects (positions, rotations, bounds) at exit
+  --dump-scene-json PATH  write the scene as JSON at exit (`-` = stdout)
+  --screenshot-every N  also save a PNG every N frames (PATH-00042.png next to --screenshot)
+  --input FILE          scripted input for headless runs, one event per line:
+                        `FRAME key|mouse_button DOWN|UP NAME`, `FRAME mouse X Y`, `FRAME wheel AMOUNT`, `FRAME text STRING`
+  --timeout SECONDS     fail if the run takes longer than this (real time)
+  --max-fps N           frame limiter (also when vsync is off; minimized windows sleep anyway)
   --size WxH            output size in pixels, e.g. 1280x720
   --fixed-dt SECONDS    fixed time step (headless default: 1/60)
   --no-vsync            uncapped FPS (benchmarking)
@@ -38,6 +44,11 @@ pub struct RunArgs {
     pub frames: Option<u64>,
     pub screenshot: Option<PathBuf>,
     pub dump_scene: bool,
+    pub dump_scene_json: Option<PathBuf>,
+    pub screenshot_every: Option<u64>,
+    pub input: Option<PathBuf>,
+    pub timeout: Option<f32>,
+    pub max_fps: Option<f32>,
     pub size: Option<(u32, u32)>,
     pub fixed_dt: Option<f32>,
     pub no_vsync: bool,
@@ -66,6 +77,18 @@ impl RunArgs {
                 }
                 "--screenshot" => out.screenshot = Some(PathBuf::from(value("--screenshot")?)),
                 "--dump-scene" => out.dump_scene = true,
+                "--dump-scene-json" => out.dump_scene_json = Some(PathBuf::from(value("--dump-scene-json")?)),
+                "--screenshot-every" => {
+                    let n: u64 = value("--screenshot-every")?.parse().map_err(|_| "--screenshot-every: expected a whole number".to_string())?;
+                    out.screenshot_every = Some(n.max(1));
+                }
+                "--input" => out.input = Some(PathBuf::from(value("--input")?)),
+                "--timeout" => {
+                    out.timeout = Some(value("--timeout")?.parse().map_err(|_| "--timeout: expected seconds".to_string())?)
+                }
+                "--max-fps" => {
+                    out.max_fps = Some(value("--max-fps")?.parse().map_err(|_| "--max-fps: expected a number".to_string())?)
+                }
                 "--size" => {
                     let v = value("--size")?;
                     let bad = || format!("--size: expected WIDTHxHEIGHT like 1280x720, got '{v}'");
@@ -102,6 +125,7 @@ pub struct App {
     width: u32,
     height: u32,
     vsync: bool,
+    max_fps: Option<f32>,
     fullscreen: bool,
     icon: Option<ImageData>,
     fps_in_title: bool,
@@ -130,6 +154,7 @@ impl App {
             width: 1280,
             height: 720,
             vsync: true,
+            max_fps: None,
             fullscreen: false,
             icon: None,
             fps_in_title: true,
@@ -156,6 +181,12 @@ impl App {
     }
 
     /// Start in borderless fullscreen (players can toggle with F11 / Alt+Enter; `--windowed` overrides).
+    /// Frame limiter (e.g. 60 or 144). Works with vsync off; `None` = no limit (default).
+    pub fn max_fps(mut self, fps: Option<f32>) -> Self {
+        self.max_fps = fps;
+        self
+    }
+
     pub fn fullscreen(mut self, on: bool) -> Self {
         self.fullscreen = on;
         self
@@ -283,7 +314,86 @@ fn finish(world: &World, renderer: &mut Renderer, args: &RunArgs, always_render:
     if args.dump_scene {
         println!("{}", world.scene.dump());
     }
+    if let Some(path) = &args.dump_scene_json {
+        let json = world.scene.dump_json();
+        if path.as_os_str() == "-" {
+            println!("{json}");
+        } else {
+            std::fs::write(path, json).map_err(|e| format!("--dump-scene-json {}: {e}", path.display()))?;
+        }
+    }
     Ok(())
+}
+
+/// One scripted input event (`--input`).
+#[derive(Clone, Debug, PartialEq)]
+enum InputEvent {
+    Key(spark_core::Key, bool),
+    Button(spark_core::MouseButton, bool),
+    Move(f32, f32),
+    Wheel(f32),
+    Text(String),
+}
+
+/// Parses an `--input` script: `FRAME key down space`, `FRAME mouse 100 200`, `#` comments.
+fn parse_input_script(src: &str) -> Result<Vec<(u64, InputEvent)>, String> {
+    let mut out = Vec::new();
+    for (n, line) in src.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let err = |m: &str| format!("--input line {}: {m}: '{line}'", n + 1);
+        let mut parts = line.split_whitespace();
+        let frame: u64 = parts.next().and_then(|f| f.parse().ok()).ok_or_else(|| err("expected a frame number first"))?;
+        let kind = parts.next().ok_or_else(|| err("missing event"))?;
+        let rest: Vec<&str> = parts.collect();
+        let down = |s: Option<&&str>| match s.copied() {
+            Some("down") | Some("press") => Ok(true),
+            Some("up") | Some("release") => Ok(false),
+            _ => Err(err("expected down / up")),
+        };
+        let ev = match kind {
+            "key" => {
+                let name = rest.get(1).ok_or_else(|| err("missing key name"))?;
+                let key = spark_core::Key::from_name(name).ok_or_else(|| err("unknown key"))?;
+                InputEvent::Key(key, down(rest.first())?)
+            }
+            "mouse_button" | "button" => {
+                let name = rest.get(1).ok_or_else(|| err("missing button name"))?;
+                let b = spark_core::MouseButton::from_name(name).ok_or_else(|| err("unknown mouse button"))?;
+                InputEvent::Button(b, down(rest.first())?)
+            }
+            "mouse" | "move" => {
+                let x = rest.first().and_then(|v| v.parse().ok()).ok_or_else(|| err("expected X Y"))?;
+                let y = rest.get(1).and_then(|v| v.parse().ok()).ok_or_else(|| err("expected X Y"))?;
+                InputEvent::Move(x, y)
+            }
+            "wheel" => InputEvent::Wheel(rest.first().and_then(|v| v.parse().ok()).ok_or_else(|| err("expected an amount"))?),
+            "text" => InputEvent::Text(rest.join(" ")),
+            _ => return Err(err("unknown event (key, mouse_button, mouse, wheel, text)")),
+        };
+        out.push((frame, ev));
+    }
+    out.sort_by_key(|e| e.0);
+    Ok(out)
+}
+
+fn apply_input(world: &mut World, ev: &InputEvent) {
+    let i = &mut world.input;
+    match ev {
+        InputEvent::Key(k, d) => i.key_event(*k, *d),
+        InputEvent::Button(b, d) => i.mouse_button_event(*b, *d),
+        InputEvent::Move(x, y) => i.mouse_moved(spark_core::Vec2::new(*x, *y)),
+        InputEvent::Wheel(a) => i.wheel_event(*a),
+        InputEvent::Text(t) => i.text_event(t),
+    }
+}
+
+/// `shot.png` + 42 -> `shot-00042.png`.
+fn numbered(path: &std::path::Path, frame: u64) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "frame".into());
+    path.with_file_name(format!("{stem}-{frame:05}.png"))
 }
 
 fn run_headless<G: Game>(app: App, mut game: G) -> Result<(), String> {
@@ -298,7 +408,25 @@ fn run_headless<G: Game>(app: App, mut game: G) -> Result<(), String> {
         game.start(&mut world);
     }
     let dt = app.args.fixed_dt.unwrap_or(1.0 / 60.0);
+    let script = match &app.args.input {
+        Some(p) => parse_input_script(&std::fs::read_to_string(p).map_err(|e| format!("--input {}: {e}", p.display()))?)?,
+        None => Vec::new(),
+    };
+    let mut next_event = 0;
+    let started = Instant::now();
+    let shots_base = app.args.screenshot.clone().unwrap_or_else(|| PathBuf::from("frame.png"));
     for _ in 0..app.args.frames.unwrap_or(1) {
+        if let Some(limit) = app.args.timeout {
+            if started.elapsed().as_secs_f32() > limit {
+                return Err(format!("--timeout: the run took longer than {limit} s (frame {})", world.time.frame));
+            }
+        }
+        // Events for the frame about to run (frame numbers start at 1, like time.frame).
+        let frame = world.time.frame + 1;
+        while next_event < script.len() && script[next_event].0 <= frame {
+            apply_input(&mut world, &script[next_event].1);
+            next_event += 1;
+        }
         if let Some(s) = &mut splash {
             if splash_frame(&mut world, s, dt) {
                 continue;
@@ -307,6 +435,13 @@ fn run_headless<G: Game>(app: App, mut game: G) -> Result<(), String> {
             game.start(&mut world);
         }
         run_frame(&mut game, &mut world, dt);
+        if let Some(n) = app.args.screenshot_every {
+            if world.time.frame % n == 0 {
+                let path = numbered(&shots_base, world.time.frame);
+                renderer.screenshot(&world)?.save_png(&path)?;
+                log::info!("screenshot saved: {}", path.display());
+            }
+        }
         if world.quit_requested() {
             break;
         }
@@ -339,6 +474,8 @@ fn run_windowed<G: Game>(app: App, game: G) -> Result<(), String> {
         fps_frames: 0,
         frames: 0,
         screenshot_requested: false,
+        minimized: false,
+        next_frame: now,
         focused: true,
         cursor_locked: false,
         pointer: false,
@@ -367,6 +504,10 @@ struct Runner<G: Game> {
     fps_frames: u32,
     frames: u64,
     screenshot_requested: bool,
+    /// Window minimized / zero-sized: no rendering, the loop sleeps.
+    minimized: bool,
+    /// Earliest time of the next frame (frame limiter).
+    next_frame: Instant,
     focused: bool,
     /// Cursor grab state currently applied to the window.
     cursor_locked: bool,
@@ -377,6 +518,21 @@ struct Runner<G: Game> {
 }
 
 impl<G: Game> Runner<G> {
+    /// Game logic keeps running while minimized (music, timers, network), nothing is drawn.
+    fn tick_minimized(&mut self, event_loop: &ActiveEventLoop) {
+        if self.splash.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        let dt = self.app.args.fixed_dt.unwrap_or((now - self.last).as_secs_f32().min(0.1));
+        self.last = now;
+        self.gamepads.poll(&mut self.world.input);
+        run_frame(&mut self.game, &mut self.world, dt);
+        if self.world.quit_requested() {
+            event_loop.exit();
+        }
+    }
+
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: String) {
         self.result = Err(error);
         event_loop.exit();
@@ -457,9 +613,22 @@ impl<G: Game> Runner<G> {
         self.apply_branding();
         self.apply_window();
         let Some(renderer) = self.renderer.as_mut() else { return };
-        if let Err(e) = renderer.render(&self.world) {
-            self.fail(event_loop, e);
-            return;
+        let capture = std::mem::take(&mut self.screenshot_requested);
+        match renderer.render_and_capture_if(&self.world, capture) {
+            Err(e) => {
+                self.fail(event_loop, e);
+                return;
+            }
+            Ok(Some(image)) => {
+                // Encode + write off the main thread: no hitch when pressing F12.
+                let millis = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                let path = PathBuf::from(format!("screenshots/shot-{millis}.png"));
+                std::thread::spawn(move || match image.save_png(&path) {
+                    Ok(()) => log::info!("screenshot saved: {}", path.display()),
+                    Err(e) => log::error!("{e}"),
+                });
+            }
+            Ok(None) => {}
         }
         self.frames += 1;
         self.fps_frames += 1;
@@ -474,16 +643,6 @@ impl<G: Game> Runner<G> {
             }
             self.fps_frames = 0;
             self.fps_timer = now;
-        }
-
-        if self.screenshot_requested {
-            self.screenshot_requested = false;
-            let millis = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-            let path = PathBuf::from(format!("screenshots/shot-{millis}.png"));
-            match renderer.screenshot(&self.world).and_then(|img| img.save_png(&path)) {
-                Ok(()) => log::info!("screenshot saved: {}", path.display()),
-                Err(e) => log::error!("{e}"),
-            }
         }
 
         let done = self.app.args.frames.is_some_and(|n| self.frames >= n);
@@ -507,7 +666,8 @@ impl<G: Game> ApplicationHandler for Runner<G> {
         self.applied_fullscreen = fullscreen;
         let attributes = Window::default_attributes()
             .with_title(self.app.title.clone())
-            .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
+            // Logical size: the same window size on 100 % and 200 % (HiDPI / Retina) displays.
+            .with_inner_size(winit::dpi::LogicalSize::new(w, h))
             .with_window_icon(icon)
             .with_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
         let window = match event_loop.create_window(attributes) {
@@ -523,6 +683,7 @@ impl<G: Game> ApplicationHandler for Runner<G> {
             }
             Err(e) => return self.fail(event_loop, e),
         }
+        window.set_ime_allowed(true); // text input via IME (CJK etc.) -> input.text()
         self.window = Some(window.clone());
         self.world.canvas.set_output_size(size.width.max(1), size.height.max(1));
         if !self.started {
@@ -558,7 +719,8 @@ impl<G: Game> ApplicationHandler for Runner<G> {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(r) = &mut self.renderer {
+                self.minimized = size.width == 0 || size.height == 0;
+                if let Some(r) = self.renderer.as_mut().filter(|_| !self.minimized) {
                     r.resize(size.width, size.height);
                 }
             }
@@ -575,9 +737,45 @@ impl<G: Game> ApplicationHandler for Runner<G> {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(w) = &self.window else { return };
+        let minimized = self.minimized || w.is_minimized() == Some(true);
+        // Minimized: ~20 updates per second, no rendering (saves battery / GPU).
+        let max_fps = if minimized { Some(20.0) } else { self.app.args.max_fps.or(self.app.max_fps) };
+        let now = Instant::now();
+        match max_fps.filter(|f| *f > 0.0) {
+            Some(_) if now < self.next_frame => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+            }
+            limit => {
+                if let Some(fps) = limit {
+                    let step = std::time::Duration::from_secs_f32(1.0 / fps);
+                    // Catch up at most one frame (no bursts after a hitch).
+                    self.next_frame = (self.next_frame + step).max(now);
+                }
+                event_loop.set_control_flow(ControlFlow::Poll);
+                if minimized {
+                    self.tick_minimized(event_loop);
+                } else {
+                    w.request_redraw();
+                }
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod input_script_tests {
+    use super::*;
+
+    #[test]
+    fn parses_events() {
+        let ev = parse_input_script("# test\n10 key down space\n5 mouse 100 200\n12 key up space\n20 mouse_button down left\n21 text hi there\n").unwrap();
+        assert_eq!(ev[0], (5, InputEvent::Move(100.0, 200.0)));
+        assert_eq!(ev[1], (10, InputEvent::Key(spark_core::Key::Space, true)));
+        assert_eq!(ev[4], (21, InputEvent::Text("hi there".into())));
+        assert!(parse_input_script("x key down space").is_err());
+        assert!(parse_input_script("1 key down nokey").is_err());
+        assert_eq!(numbered(std::path::Path::new("out/shot.png"), 42), PathBuf::from("out/shot-00042.png"));
     }
 }

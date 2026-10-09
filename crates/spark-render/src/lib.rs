@@ -15,8 +15,9 @@ use bytemuck::{Pod, Zeroable};
 use spark_core::shader::{COPY_POST, MAX_PARAMS_SIZE};
 use spark_core::{
     Aabb, Assets, Batch, Canvas, CanvasTexture, Color, ImageData, Layer, Mat4, MeshId, PassSize, ShaderData, ShaderKind,
-    TextureFilter, TextureId, Vec3, Vertex, Vertex2D, World,
+    TextureFilter, TextureId, Vec3, Vec4, Vertex, Vertex2D, World,
 };
+use spark_core::material::BlendMode;
 use wgpu::util::DeviceExt;
 
 pub use wgpu;
@@ -29,6 +30,17 @@ const CANVAS_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
 /// Glyph atlas: coverage in alpha, not sRGB-encoded.
 const GLYPH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Pipeline variant bits: blend mode (0 opaque, 1 alpha, 2 additive) | double-sided.
+/// Objects per instanced draw: `array<Object, 64>` uniform window (11 KB, fits every GPU incl. GL).
+const MAX_INSTANCES: usize = 64;
+const VARIANT_ALPHA: u8 = 1;
+const VARIANT_ADDITIVE: u8 = 2;
+const VARIANT_DOUBLE_SIDED: u8 = 4;
+
+/// Pipeline cache key: output format, variant bits, MSAA sample count.
+type PipelineKey = (wgpu::TextureFormat, u8, u32);
 
 /// Matches `struct Frame` in spark-core/src/shaders/common.wgsl.
 #[repr(C)]
@@ -49,6 +61,9 @@ struct FrameUniform {
     fog: [f32; 4],
     light_count: [u32; 4],
     lights: [LightUniform; MAX_LIGHTS],
+    shadow_view_proj: [[f32; 4]; 4],
+    /// enabled, 1 / map size, normal offset, shadow distance
+    shadow: [f32; 4],
 }
 
 const MAX_LIGHTS: usize = spark_core::Light::MAX_VISIBLE;
@@ -138,7 +153,7 @@ struct GpuShader {
     version: u64,
     /// `None` when the GPU rejected it (logged once; the default shader is used instead).
     module: Option<wgpu::ShaderModule>,
-    pipelines: HashMap<wgpu::TextureFormat, Option<wgpu::RenderPipeline>>,
+    pipelines: HashMap<PipelineKey, Option<wgpu::RenderPipeline>>,
     params: wgpu::Buffer,
     resources: wgpu::BindGroup,
     textures: [Option<TextureId>; 2],
@@ -154,10 +169,48 @@ enum ShaderRef {
 
 struct SceneTarget {
     size: (u32, u32),
+    samples: u32,
     _color: wgpu::Texture,
     _depth: wgpu::Texture,
+    /// Single-sample (resolved) scene image and depth: read by the post chain.
     color_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
+    /// Multisampled color + depth when MSAA is on (rendered into, then resolved).
+    msaa: Option<(wgpu::Texture, wgpu::TextureView, wgpu::Texture, wgpu::TextureView)>,
+    /// Bind group reading the multisampled depth (depth resolve pass).
+    depth_resolve: Option<wgpu::BindGroup>,
+}
+
+/// Sun shadow map.
+struct ShadowMap {
+    size: u32,
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+/// One object to draw this frame (before sorting / batching).
+struct Candidate {
+    uniform: ObjectUniform,
+    shader: ShaderRef,
+    variant: u8,
+    mesh: usize,
+    texture: Option<usize>,
+    /// View-space distance (transparent sorting).
+    depth: f32,
+    in_view: bool,
+    caster: bool,
+    triangles: u64,
+}
+
+/// Consecutive objects drawn with one instanced draw call.
+struct Batch3 {
+    shader: ShaderRef,
+    variant: u8,
+    mesh: usize,
+    texture: Option<usize>,
+    /// Byte offset of the batch's first object (dynamic uniform offset).
+    offset: u32,
+    count: u32,
 }
 
 /// Intermediate image of the post chain.
@@ -181,13 +234,6 @@ struct SurfaceState {
 
 type SurfaceFactory = Box<dyn Fn(&wgpu::Instance) -> Option<wgpu::Surface<'static>>>;
 
-struct Draw {
-    shader: ShaderRef,
-    mesh: usize,
-    texture: Option<usize>,
-    slot: u32,
-}
-
 /// Draws a [`World`] to a window or to an image.
 pub struct Renderer {
     instance: wgpu::Instance,
@@ -204,8 +250,23 @@ pub struct Renderer {
     object_layout: wgpu::BindGroupLayout,
     object_buffer: wgpu::Buffer,
     object_bind_group: wgpu::BindGroup,
+    /// Object buffer size in bytes.
     object_capacity: usize,
-    object_stride: u64,
+    /// Dynamic offset alignment of the object buffer.
+    object_align: u64,
+    frame_layout: wgpu::BindGroupLayout,
+    adapter_formats: HashMap<wgpu::TextureFormat, wgpu::TextureFormatFeatureFlags>,
+    shadow_sampler: wgpu::Sampler,
+    /// 1x1 map bound when shadows are off.
+    shadow_dummy: ShadowMap,
+    shadow: Option<ShadowMap>,
+    shadow_buffer: wgpu::Buffer,
+    shadow_bind_group: wgpu::BindGroup,
+    shadow_pipeline: wgpu::RenderPipeline,
+    depth_resolve_layout: wgpu::BindGroupLayout,
+    depth_resolve_layout_p: wgpu::PipelineLayout,
+    depth_resolve_shader: wgpu::ShaderModule,
+    depth_resolve_pipelines: HashMap<u32, wgpu::RenderPipeline>,
     texture_layout: wgpu::BindGroupLayout,
     /// nearest / linear with Repeat (meshes), then nearest / linear with ClampToEdge (2D canvas, post input).
     texture_samplers: [wgpu::Sampler; 4],
@@ -239,8 +300,13 @@ pub struct Renderer {
     assets_generation: u64,
     /// `Assets::mesh_edits` already applied.
     mesh_edits: u64,
-    draws: Vec<Draw>,
+    candidates: Vec<Candidate>,
+    order: Vec<u32>,
+    batches: Vec<Batch3>,
+    shadow_batches: Vec<Batch3>,
     scratch: Vec<u8>,
+    world_matrices: Vec<Mat4>,
+    world_visible: Vec<bool>,
 }
 
 fn sanitize_backend_env() {
@@ -321,6 +387,21 @@ impl Renderer {
 
     /// Draws the world to the window.
     pub fn render(&mut self, world: &World) -> Result<FrameStats, String> {
+        self.render_frame(world, false).map(|(stats, _)| stats)
+    }
+
+    /// Draws the world to the window and also returns that frame as an image (F12): the scene
+    /// is drawn once, only the cheap post chain runs a second time into the capture target.
+    pub fn render_and_capture(&mut self, world: &World) -> Result<(FrameStats, Option<ImageData>), String> {
+        self.render_frame(world, true)
+    }
+
+    /// [`Self::render`], plus the frame as an image when `capture` is true.
+    pub fn render_and_capture_if(&mut self, world: &World, capture: bool) -> Result<Option<ImageData>, String> {
+        self.render_frame(world, capture).map(|(_, image)| image)
+    }
+
+    fn render_frame(&mut self, world: &World, capture: bool) -> Result<(FrameStats, Option<ImageData>), String> {
         let Some(state) = &self.surface else {
             return Err("render(): this renderer is headless, use screenshot()".into());
         };
@@ -330,32 +411,41 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
                 drop(t);
                 self.reconfigure();
-                return Ok(FrameStats::default());
+                return Ok((FrameStats::default(), None));
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.reconfigure();
-                return Ok(FrameStats::default());
+                return Ok((FrameStats::default(), None));
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 self.recreate_surface();
-                return Ok(FrameStats::default());
+                return Ok((FrameStats::default(), None));
             }
             wgpu::CurrentSurfaceTexture::Validation => return Err("window surface validation error".into()),
             #[allow(unreachable_patterns)]
-            _ => return Ok(FrameStats::default()),
+            _ => return Ok((FrameStats::default(), None)),
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(view_format), ..Default::default() });
         self.ensure_canvas_pipeline(view_format);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("spark frame") });
         let mut stats = self.draw_scene(&mut encoder, world);
         stats.post_passes = self.draw_post(&mut encoder, &view, view_format, world);
-        self.queue.submit([encoder.finish()]);
+        if !capture {
+            self.queue.submit([encoder.finish()]);
+            self.queue.present(frame);
+            return Ok((stats, None));
+        }
+        self.ensure_capture();
+        self.ensure_canvas_pipeline(COLOR_FORMAT);
+        let target = self.capture.take().expect("capture target");
+        self.draw_post(&mut encoder, &target.view, COLOR_FORMAT, world);
+        self.capture = Some(target);
+        let image = self.read_capture(encoder);
         self.queue.present(frame);
-        Ok(stats)
+        Ok((stats, Some(image?)))
     }
 
-    /// Draws the world and returns the final image (same as what the window shows).
-    pub fn screenshot(&mut self, world: &World) -> Result<ImageData, String> {
+    fn ensure_capture(&mut self) {
         let size = (self.width, self.height);
         if self.capture.as_ref().is_none_or(|c| c.size != size) {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -371,14 +461,24 @@ impl Renderer {
             let view = texture.create_view(&Default::default());
             self.capture = Some(Capture { size, texture, view });
         }
-        self.ensure_canvas_pipeline(COLOR_FORMAT);
+    }
 
+    /// Draws the world and returns the final image (same as what the window shows).
+    pub fn screenshot(&mut self, world: &World) -> Result<ImageData, String> {
+        self.ensure_capture();
+        self.ensure_canvas_pipeline(COLOR_FORMAT);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("spark screenshot") });
         self.draw_scene(&mut encoder, world);
         let capture = self.capture.take().expect("capture target");
         self.draw_post(&mut encoder, &capture.view, COLOR_FORMAT, world);
-        let capture = self.capture.insert(capture);
+        self.capture = Some(capture);
+        self.read_capture(encoder)
+    }
 
+    /// Submits `encoder` plus a copy of the capture target and reads the pixels back.
+    fn read_capture(&mut self, mut encoder: wgpu::CommandEncoder) -> Result<ImageData, String> {
+        let capture = self.capture.as_ref().expect("capture target");
+        let size = capture.size;
         let unpadded = size.0 * 4;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -437,13 +537,53 @@ impl Renderer {
             driver: format!("{} {}", ai.driver, ai.driver_info).trim().to_string(),
         };
 
+        let adapter_formats = [COLOR_FORMAT, DEPTH_FORMAT]
+            .into_iter()
+            .map(|f| (f, adapter.get_texture_format_features(f).flags))
+            .collect::<HashMap<_, _>>();
         let frame_size = size_of::<FrameUniform>() as u64;
         let object_size = size_of::<ObjectUniform>() as u64;
         let vf = wgpu::ShaderStages::VERTEX_FRAGMENT;
         let fs = wgpu::ShaderStages::FRAGMENT;
 
-        let frame_layout = bind_group_layout(&device, "spark frame", &[uniform_entry(0, false, frame_size, vf)]);
-        let object_layout = bind_group_layout(&device, "spark object", &[uniform_entry(0, true, object_size, vf)]);
+        let depth_entry = |binding: u32, multisampled: bool, visibility: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled,
+            },
+            count: None,
+        };
+        let frame_layout = bind_group_layout(
+            &device,
+            "spark frame",
+            &[
+                uniform_entry(0, false, frame_size, vf),
+                depth_entry(1, false, vf),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: vf,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        );
+        let object_layout = bind_group_layout(
+            &device,
+            "spark objects",
+            &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: vf,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: NonZeroU64::new(object_size * MAX_INSTANCES as u64),
+                },
+                count: None,
+            }],
+        );
         let texture_layout = bind_group_layout(&device, "spark texture", &[texture_entry(0, fs), sampler_entry(1, fs)]);
         let shader_layout = bind_group_layout(
             &device,
@@ -472,17 +612,74 @@ impl Renderer {
         );
 
         let frame_buffer = uniform_buffer(&device, "spark frame", frame_size);
-        let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("spark frame"),
-            layout: &frame_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: frame_buffer.as_entire_binding() }],
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("spark shadow sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
         });
+        let shadow_dummy = shadow_map(&device, 1);
+        let frame_bind_group = frame_bind_group(&device, &frame_layout, &frame_buffer, &shadow_dummy.view, &shadow_sampler);
 
-        let align = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let object_stride = object_size.div_ceil(align) * align;
-        let object_capacity = 256;
-        let (object_buffer, object_bind_group) =
-            object_buffer(&device, &object_layout, object_capacity, object_stride, object_size);
+        // Per-object uniforms, read in 64-object windows (dynamic offsets) by instanced draws.
+        let object_align = device.limits().min_uniform_buffer_offset_alignment as u64;
+        let object_capacity = 64 * 1024;
+        let (object_buffer, object_bind_group) = object_buffer(&device, &object_layout, object_capacity);
+
+        let shadow_layout =
+            bind_group_layout(&device, "spark shadow", &[uniform_entry(0, false, 64, wgpu::ShaderStages::VERTEX)]);
+        let shadow_buffer = uniform_buffer(&device, "spark shadow view", 64);
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("spark shadow"),
+            layout: &shadow_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: shadow_buffer.as_entire_binding() }],
+        });
+        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("spark shadow"),
+            bind_group_layouts: &[Some(&shadow_layout), Some(&object_layout)],
+            immediate_size: 0,
+        });
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("spark shadow shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shadow.wgsl").into()),
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("spark shadow"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &VERTEX_ATTRIBUTES[..1],
+                })],
+            },
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SHADOW_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.5, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
+        let depth_resolve_layout = bind_group_layout(&device, "spark depth resolve", &[depth_entry(0, true, fs)]);
+        let depth_resolve_layout_p = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("spark depth resolve"),
+            bind_group_layouts: &[Some(&depth_resolve_layout)],
+            immediate_size: 0,
+        });
+        let depth_resolve_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("spark depth resolve"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/depth_resolve.wgsl").into()),
+        });
 
         let sampler = |filter: wgpu::FilterMode, address: wgpu::AddressMode| {
             device.create_sampler(&wgpu::SamplerDescriptor {
@@ -560,7 +757,19 @@ impl Renderer {
             object_buffer,
             object_bind_group,
             object_capacity,
-            object_stride,
+            object_align,
+            frame_layout,
+            adapter_formats,
+            shadow_sampler,
+            shadow_dummy,
+            shadow: None,
+            shadow_buffer,
+            shadow_bind_group,
+            shadow_pipeline,
+            depth_resolve_layout,
+            depth_resolve_layout_p,
+            depth_resolve_shader,
+            depth_resolve_pipelines: HashMap::new(),
             texture_layout,
             texture_samplers,
             shader_layout,
@@ -588,8 +797,13 @@ impl Renderer {
             white,
             assets_generation: u64::MAX,
             mesh_edits: 0,
-            draws: Vec::new(),
+            candidates: Vec::new(),
+            order: Vec::new(),
+            batches: Vec::new(),
+            shadow_batches: Vec::new(),
             scratch: Vec::new(),
+            world_matrices: Vec::new(),
+            world_visible: Vec::new(),
         }
     }
 
@@ -669,40 +883,49 @@ impl Renderer {
     }
 
 
-    fn ensure_scene_target(&mut self, size: (u32, u32)) {
+    fn ensure_scene_target(&mut self, size: (u32, u32), samples: u32) {
         let max = self.device.limits().max_texture_dimension_2d;
         let size = (size.0.clamp(1, max), size.1.clamp(1, max));
-        if self.scene_target.as_ref().is_some_and(|t| t.size == size) {
+        if self.scene_target.as_ref().is_some_and(|t| t.size == size && t.samples == samples) {
             return;
         }
-        let make = |label: &str, format: wgpu::TextureFormat, usage: wgpu::TextureUsages| {
+        let make = |label: &str, format: wgpu::TextureFormat, usage: wgpu::TextureUsages, sample_count: u32| {
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: extent(size),
                 mip_level_count: 1,
-                sample_count: 1,
+                sample_count,
                 dimension: wgpu::TextureDimension::D2,
                 format,
                 usage,
                 view_formats: &[],
             })
         };
-        let color = make(
-            "spark scene color",
-            COLOR_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
-        let depth = make(
-            "spark scene depth",
-            DEPTH_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
+        let rt = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let color = make("spark scene color", COLOR_FORMAT, rt, 1);
+        let depth = make("spark scene depth", DEPTH_FORMAT, rt, 1);
+        let (msaa, depth_resolve) = if samples > 1 {
+            let mc = make("spark scene color msaa", COLOR_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, samples);
+            let md = make("spark scene depth msaa", DEPTH_FORMAT, rt, samples);
+            let (mcv, mdv) = (mc.create_view(&Default::default()), md.create_view(&Default::default()));
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("spark depth resolve"),
+                layout: &self.depth_resolve_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&mdv) }],
+            });
+            (Some((mc, mcv, md, mdv)), Some(bg))
+        } else {
+            (None, None)
+        };
         self.scene_target = Some(SceneTarget {
             size,
+            samples,
             color_view: color.create_view(&Default::default()),
             depth_view: depth.create_view(&Default::default()),
             _color: color,
             _depth: depth,
+            msaa,
+            depth_resolve,
         });
     }
 
@@ -824,7 +1047,7 @@ impl Renderer {
     }
 
     /// Builds the pipeline of `r` for `format` if needed. `false` = the shader cannot be used.
-    fn ensure_shader_pipeline(&mut self, r: ShaderRef, format: wgpu::TextureFormat) -> bool {
+    fn ensure_shader_pipeline(&mut self, r: ShaderRef, key: PipelineKey) -> bool {
         let s = match r {
             ShaderRef::Default => &mut self.default_surface,
             ShaderRef::Copy => &mut self.copy_post,
@@ -834,19 +1057,31 @@ impl Renderer {
             ShaderKind::Surface => &self.mesh_pipeline_layout,
             ShaderKind::Post => &self.post_pipeline_layout,
         };
-        ensure_pipeline(&self.device, layout, s, format);
-        s.pipelines.get(&format).is_some_and(|p| p.is_some())
+        ensure_pipeline(&self.device, layout, s, key);
+        s.pipelines.get(&key).is_some_and(|p| p.is_some())
     }
 
-    fn pipeline(&self, r: ShaderRef, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
-        self.shader(r).pipelines[&format].as_ref().expect("pipeline ensured")
+    fn pipeline(&self, r: ShaderRef, key: PipelineKey) -> &wgpu::RenderPipeline {
+        self.shader(r).pipelines[&key].as_ref().expect("pipeline ensured")
+    }
+
+    /// MSAA sample count supported for both scene formats (falls back to 1).
+    fn supported_samples(&self, wanted: u32) -> u32 {
+        let ok = |n: u32| {
+            [COLOR_FORMAT, DEPTH_FORMAT].iter().all(|f| self.adapter_formats.get(f).is_some_and(|fl| fl.sample_count_supported(n)))
+        };
+        if self.info.backend == "Gl" {
+            return 1; // GL / GLES: no multisampled depth reads for the post chain
+        }
+        [8, 4, 2].into_iter().find(|&n| n <= wanted && ok(n)).unwrap_or(1)
     }
 
     fn draw_scene(&mut self, encoder: &mut wgpu::CommandEncoder, world: &World) -> FrameStats {
         self.sync_assets(&world.assets);
         self.sync_shaders(&world.assets);
         let rs = &world.render;
-        self.ensure_scene_target(rs.internal_size(self.width, self.height));
+        let samples = self.supported_samples(rs.msaa.max(1));
+        self.ensure_scene_target(rs.internal_size(self.width, self.height), samples);
         let internal = self.scene_target.as_ref().expect("scene target").size;
 
         let scene = &world.scene;
@@ -854,13 +1089,36 @@ impl Renderer {
         let aspect = self.width as f32 / self.height as f32;
         let (view, proj) = (cam.view(), cam.projection(aspect));
         let view_proj = proj * view;
+        let planes = frustum_planes(&view_proj);
         let sun = scene.sun.color.to_linear();
         let si = scene.sun.intensity;
         let (fog_color, fog) = match scene.fog {
             Some(f) => (f.color.to_linear(), [f.near, f.far, 1.0, 0.0]),
             None => ([0.0; 4], [0.0; 4]),
         };
-        let (lights, light_count) = collect_lights(scene);
+
+        // World matrices + visibility of every object in one O(n) pass (interpolated bodies).
+        let mut mats = std::mem::take(&mut self.world_matrices);
+        let mut vis = std::mem::take(&mut self.world_visible);
+        scene.compute_world_transforms(world.time.alpha(), &mut mats, &mut vis);
+        let (lights, light_count) = collect_lights(scene, &mats, &vis, &planes);
+
+        // Sun shadow map.
+        let max_dim = self.device.limits().max_texture_dimension_2d;
+        let shadow_size = rs.shadow_size.clamp(256, max_dim.min(8192));
+        let shadows = rs.shadows && si > 0.0 && rs.shadow_distance > 0.0;
+        if shadows && self.shadow.as_ref().is_none_or(|m| m.size != shadow_size) {
+            let map = shadow_map(&self.device, shadow_size);
+            self.frame_bind_group = frame_bind_group(&self.device, &self.frame_layout, &self.frame_buffer, &map.view, &self.shadow_sampler);
+            self.shadow = Some(map);
+        } else if !shadows && self.shadow.is_some() {
+            self.shadow = None;
+            self.frame_bind_group =
+                frame_bind_group(&self.device, &self.frame_layout, &self.frame_buffer, &self.shadow_dummy.view, &self.shadow_sampler);
+        }
+        let light_vp = if shadows { sun_view_proj(cam, scene.sun.direction, rs.shadow_distance, shadow_size) } else { Mat4::IDENTITY };
+        let texel_world = rs.shadow_distance / shadow_size as f32;
+
         let t = &world.time;
         let frame = FrameUniform {
             view_proj: view_proj.to_cols_array_2d(),
@@ -878,95 +1136,197 @@ impl Renderer {
             fog,
             light_count: [light_count as u32, 0, 0, 0],
             lights,
+            shadow_view_proj: light_vp.to_cols_array_2d(),
+            shadow: [flag(shadows), 1.0 / shadow_size as f32, texel_world * 1.5, rs.shadow_distance],
         };
         self.queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
+        if shadows {
+            self.queue.write_buffer(&self.shadow_buffer, 0, bytemuck::bytes_of(&light_vp.to_cols_array_2d()));
+        }
 
-        // Collect visible objects into the per-object uniform buffer.
-        let mut draws = std::mem::take(&mut self.draws);
-        let mut scratch = std::mem::take(&mut self.scratch);
-        draws.clear();
-        scratch.clear();
+        // Candidates: everything visible in the camera or casting into the shadow map.
+        let mut cands = std::mem::take(&mut self.candidates);
+        cands.clear();
         let mut stats = FrameStats { internal_size: internal, ..Default::default() };
         let fallback = self.asset_shader(rs.shader, ShaderKind::Surface).unwrap_or(ShaderRef::Default);
         for (id, obj) in scene.iter() {
             let Some(mesh) = obj.mesh else { continue };
             let mesh = mesh.0 as usize;
             let Some(Some(gpu_mesh)) = self.meshes.get(mesh) else { continue };
-            if !scene.is_visible(id) {
+            let i = id.index() as usize;
+            if !vis[i] {
                 continue;
             }
-            let model = scene.world_matrix(id);
-            if outside_frustum(&(view_proj * model), &obj.local_bounds()) {
-                stats.culled += 1;
-                continue;
-            }
+            let model = mats[i];
             let m = &obj.material;
-            let uniform = ObjectUniform {
-                model: model.to_cols_array_2d(),
-                normal_matrix: normal_matrix(&model).to_cols_array_2d(),
-                color: m.color.to_linear(),
-                data: m.data,
-                info: [m.tiling.x, m.tiling.y, flag(m.unlit), 0.0],
-            };
-            let slot = draws.len() as u32;
-            scratch.resize((slot as u64 * self.object_stride) as usize, 0);
-            scratch.extend_from_slice(bytemuck::bytes_of(&uniform));
-            stats.triangles += (gpu_mesh.index_count / 3) as u64;
-            let texture = m.texture.map(|t| t.0 as usize).filter(|&t| t < self.textures.len());
-            let shader = self.asset_shader(m.shader, ShaderKind::Surface).unwrap_or(fallback);
-            draws.push(Draw { shader, mesh, texture, slot });
+            let bounds = obj.local_bounds();
+            let in_view = !outside_frustum(&(view_proj * model), &bounds);
+            let transparent = m.is_transparent();
+            let caster = shadows && m.cast_shadow && !transparent && !outside_frustum(&(light_vp * model), &bounds);
+            if !in_view {
+                stats.culled += 1;
+                if !caster {
+                    continue;
+                }
+            }
+            let variant = match m.effective_blend() {
+                BlendMode::Alpha => VARIANT_ALPHA,
+                BlendMode::Additive => VARIANT_ADDITIVE,
+                _ => 0,
+            } | if m.double_sided { VARIANT_DOUBLE_SIDED } else { 0 };
+            let center = model.transform_point3(if bounds.is_empty() { Vec3::ZERO } else { (bounds.min + bounds.max) * 0.5 });
+            cands.push(Candidate {
+                uniform: ObjectUniform {
+                    model: model.to_cols_array_2d(),
+                    normal_matrix: normal_matrix(&model).to_cols_array_2d(),
+                    color: m.color.to_linear(),
+                    data: m.data,
+                    info: [m.tiling.x, m.tiling.y, flag(m.unlit), 0.0],
+                },
+                shader: self.asset_shader(m.shader, ShaderKind::Surface).unwrap_or(fallback),
+                variant,
+                mesh,
+                texture: m.texture.map(|t| t.0 as usize).filter(|&t| t < self.textures.len()),
+                depth: -view.transform_point3(center).z,
+                in_view,
+                caster,
+                triangles: (gpu_mesh.index_count / 3) as u64,
+            });
         }
-        stats.draw_calls = draws.len() as u32;
+        self.world_matrices = mats;
+        self.world_visible = vis;
 
-        if draws.len() > self.object_capacity {
-            self.object_capacity = draws.len().next_power_of_two();
-            let (buffer, bind_group) = object_buffer(
-                &self.device,
-                &self.object_layout,
-                self.object_capacity,
-                self.object_stride,
-                size_of::<ObjectUniform>() as u64,
-            );
+        // Pipelines for every (shader, variant) in use; broken shaders fall back to the default.
+        let mut usable: HashMap<(ShaderRef, u8), bool> = HashMap::new();
+        for c in cands.iter_mut().filter(|c| c.in_view) {
+            let key = (c.shader, c.variant);
+            let ok = match usable.get(&key) {
+                Some(&ok) => ok,
+                None => {
+                    let ok = self.ensure_shader_pipeline(c.shader, (COLOR_FORMAT, c.variant, samples));
+                    usable.insert(key, ok);
+                    ok
+                }
+            };
+            if !ok {
+                c.shader = ShaderRef::Default;
+                self.ensure_shader_pipeline(ShaderRef::Default, (COLOR_FORMAT, c.variant, samples));
+            }
+        }
+
+        // Order: opaque grouped by state (instanced), then transparent back to front.
+        let mut order = std::mem::take(&mut self.order);
+        order.clear();
+        order.extend((0..cands.len() as u32).filter(|&i| cands[i as usize].in_view));
+        let transparent = |c: &Candidate| c.variant & (VARIANT_ALPHA | VARIANT_ADDITIVE) != 0;
+        order.sort_by(|&a, &b| {
+            let (a, b) = (&cands[a as usize], &cands[b as usize]);
+            match (transparent(a), transparent(b)) {
+                (false, false) => (a.variant, a.shader, a.texture, a.mesh).cmp(&(b.variant, b.shader, b.texture, b.mesh)),
+                (true, true) => b.depth.total_cmp(&a.depth),
+                (ta, tb) => ta.cmp(&tb),
+            }
+        });
+        let scene_count = order.len();
+        order.extend((0..cands.len() as u32).filter(|&i| cands[i as usize].caster));
+        order[scene_count..].sort_by_key(|&i| cands[i as usize].mesh);
+
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        let mut batches = std::mem::take(&mut self.batches);
+        let mut shadow_batches = std::mem::take(&mut self.shadow_batches);
+        batches.clear();
+        shadow_batches.clear();
+        let align = self.object_align as usize;
+        for (slot, &ci) in order.iter().enumerate() {
+            let c = &cands[ci as usize];
+            let shadow_part = slot >= scene_count;
+            if !shadow_part {
+                stats.triangles += c.triangles;
+            }
+            let list = if shadow_part { &mut shadow_batches } else { &mut batches };
+            let same = list.last().is_some_and(|b: &Batch3| {
+                (b.count as usize) < MAX_INSTANCES
+                    && b.mesh == c.mesh
+                    && (shadow_part || (b.shader == c.shader && b.variant == c.variant && b.texture == c.texture))
+            });
+            if same {
+                list.last_mut().expect("batch").count += 1;
+            } else {
+                scratch.resize(scratch.len().div_ceil(align) * align, 0);
+                list.push(Batch3 {
+                    shader: c.shader,
+                    variant: c.variant,
+                    mesh: c.mesh,
+                    texture: c.texture,
+                    offset: scratch.len() as u32,
+                    count: 1,
+                });
+            }
+            scratch.extend_from_slice(bytemuck::bytes_of(&c.uniform));
+        }
+        stats.draw_calls = batches.len() as u32;
+        self.candidates = cands;
+        self.order = order;
+
+        // The last batch binds a full 64-object window: keep that much room after it.
+        let needed = scratch.len() + MAX_INSTANCES * size_of::<ObjectUniform>();
+        if needed > self.object_capacity {
+            self.object_capacity = needed.next_power_of_two();
+            let (buffer, bind_group) = object_buffer(&self.device, &self.object_layout, self.object_capacity);
             self.object_buffer = buffer;
             self.object_bind_group = bind_group;
         }
         if !scratch.is_empty() {
             self.queue.write_buffer(&self.object_buffer, 0, &scratch);
         }
-        // Pipelines for every shader in use; broken ones fall back to the default.
-        self.ensure_shader_pipeline(ShaderRef::Default, COLOR_FORMAT);
-        let mut usable: HashMap<ShaderRef, bool> = HashMap::new();
-        for d in &mut draws {
-            let ok = match usable.get(&d.shader) {
-                Some(&ok) => ok,
-                None => {
-                    let ok = self.ensure_shader_pipeline(d.shader, COLOR_FORMAT);
-                    usable.insert(d.shader, ok);
-                    ok
-                }
-            };
-            if !ok {
-                d.shader = ShaderRef::Default;
+        self.scratch = scratch;
+
+        // Shadow pass.
+        if let Some(map) = self.shadow.as_ref().filter(|_| shadows) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("spark shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &map.view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.shadow_bind_group, &[]);
+            for b in &shadow_batches {
+                pass.set_bind_group(1, &self.object_bind_group, &[b.offset]);
+                let mesh = self.meshes[b.mesh].as_ref().expect("uploaded mesh");
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..b.count);
             }
         }
-        draws.sort_by_key(|d| (d.shader, d.texture, d.mesh));
 
         let target = self.scene_target.as_ref().expect("scene target");
         let bg = scene.background.to_linear();
         {
+            let (color_view, resolve, depth_view) = match &target.msaa {
+                Some((_, cv, _, dv)) => (cv, Some(&target.color_view), dv),
+                None => (&target.color_view, None, &target.depth_view),
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("spark scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.color_view,
+                    view: color_view,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: resolve,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: bg[0] as f64, g: bg[1] as f64, b: bg[2] as f64, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
+                        store: if resolve.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &target.depth_view,
+                    view: depth_view,
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
@@ -976,30 +1336,86 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             let nearest = rs.filter == TextureFilter::Nearest;
-            let (mut last_shader, mut last_mesh, mut last_texture) = (None, usize::MAX, None::<Option<usize>>);
-            for d in &draws {
-                if last_shader != Some(d.shader) {
-                    pass.set_pipeline(self.pipeline(d.shader, COLOR_FORMAT));
-                    pass.set_bind_group(3, &self.shader(d.shader).resources, &[]);
-                    last_shader = Some(d.shader);
+            let (mut last_pipe, mut last_shader, mut last_mesh, mut last_texture) =
+                (None, None, usize::MAX, None::<Option<usize>>);
+            for b in &batches {
+                if last_pipe != Some((b.shader, b.variant)) {
+                    pass.set_pipeline(self.pipeline(b.shader, (COLOR_FORMAT, b.variant, samples)));
+                    last_pipe = Some((b.shader, b.variant));
                 }
-                let mesh = self.meshes[d.mesh].as_ref().expect("uploaded mesh");
-                pass.set_bind_group(1, &self.object_bind_group, &[(d.slot as u64 * self.object_stride) as u32]);
-                if last_texture != Some(d.texture) {
-                    let tex = d.texture.map(|t| &self.textures[t]).unwrap_or(&self.white);
+                if last_shader != Some(b.shader) {
+                    pass.set_bind_group(3, &self.shader(b.shader).resources, &[]);
+                    last_shader = Some(b.shader);
+                }
+                pass.set_bind_group(1, &self.object_bind_group, &[b.offset]);
+                let mesh = self.meshes[b.mesh].as_ref().expect("uploaded mesh");
+                if last_texture != Some(b.texture) {
+                    let tex = b.texture.map(|t| &self.textures[t]).unwrap_or(&self.white);
                     pass.set_bind_group(2, if nearest { &tex.nearest } else { &tex.linear }, &[]);
-                    last_texture = Some(d.texture);
+                    last_texture = Some(b.texture);
                 }
-                if last_mesh != d.mesh {
+                if last_mesh != b.mesh {
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    last_mesh = d.mesh;
+                    last_mesh = b.mesh;
                 }
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..b.count);
             }
         }
-        self.draws = draws;
-        self.scratch = scratch;
+        self.batches = batches;
+        self.shadow_batches = shadow_batches;
+
+        // Post shaders read the single-sample depth: resolve it only when there is a post chain.
+        if samples > 1 && !world.render.post.is_empty() {
+            if !self.depth_resolve_pipelines.contains_key(&samples) {
+                let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("spark depth resolve"),
+                    layout: Some(&self.depth_resolve_layout_p),
+                    vertex: wgpu::VertexState {
+                        module: &self.depth_resolve_shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: Default::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Always),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &self.depth_resolve_shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                });
+                self.depth_resolve_pipelines.insert(samples, p);
+            }
+            let target = self.scene_target.as_ref().expect("scene target");
+            if let Some(bg) = &target.depth_resolve {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("spark depth resolve"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &target.depth_view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.depth_resolve_pipelines[&samples]);
+                pass.set_bind_group(0, bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
 
         // 2D "scene" layer: drawn into the 3D image, so it goes through the post passes.
         self.prepare_canvas(&world.canvas);
@@ -1048,11 +1464,11 @@ impl Renderer {
         let mut keep = Vec::with_capacity(n);
         for (i, (r, _)) in chain.iter().enumerate() {
             let f = if i + 1 == n { format } else { COLOR_FORMAT };
-            keep.push(self.ensure_shader_pipeline(*r, f));
+            keep.push(self.ensure_shader_pipeline(*r, (f, 0, 1)));
         }
         let mut chain: Vec<_> = chain.into_iter().zip(keep).filter(|(_, ok)| *ok).map(|(c, _)| c).collect();
-        if chain.last().is_none_or(|l| l.1 != output || !self.shader(l.0).pipelines.get(&format).is_some_and(|p| p.is_some())) {
-            self.ensure_shader_pipeline(ShaderRef::Copy, format);
+        if chain.last().is_none_or(|l| l.1 != output || !self.shader(l.0).pipelines.get(&(format, 0, 1)).is_some_and(|p| p.is_some())) {
+            self.ensure_shader_pipeline(ShaderRef::Copy, (format, 0, 1));
             chain.push((ShaderRef::Copy, output));
         }
         let n = chain.len();
@@ -1123,7 +1539,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(self.pipeline(r, if last { format } else { COLOR_FORMAT }));
+            pass.set_pipeline(self.pipeline(r, (if last { format } else { COLOR_FORMAT }, 0, 1)));
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_bind_group(1, &self.shader(r).resources, &[]);
             pass.draw(0..3, 0..1);
@@ -1198,13 +1614,40 @@ fn shader_resources(
 }
 
 /// Pipeline of a shader for one output format (cached; `None` cached when the GPU rejects it).
-fn ensure_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, s: &mut GpuShader, format: wgpu::TextureFormat) {
-    if s.pipelines.contains_key(&format) {
+fn ensure_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, s: &mut GpuShader, key: PipelineKey) {
+    if s.pipelines.contains_key(&key) {
         return;
     }
+    let (format, variant, samples) = key;
     let Some(module) = &s.module else {
-        s.pipelines.insert(format, None);
+        s.pipelines.insert(key, None);
         return;
+    };
+    let transparent = variant & (VARIANT_ALPHA | VARIANT_ADDITIVE) != 0;
+    let blend = if variant & VARIANT_ADDITIVE != 0 {
+        Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        })
+    } else if variant & VARIANT_ALPHA != 0 {
+        Some(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::OVER,
+        })
+    } else {
+        None
     };
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let vertex_buffers = [Some(wgpu::VertexBufferLayout {
@@ -1226,7 +1669,7 @@ fn ensure_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, s: &mut
             wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: if variant & VARIANT_DOUBLE_SIDED != 0 { None } else { Some(wgpu::Face::Back) },
                 ..Default::default()
             }
         } else {
@@ -1234,17 +1677,17 @@ fn ensure_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, s: &mut
         },
         depth_stencil: surface.then(|| wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(!transparent),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: Default::default(),
             bias: Default::default(),
         }),
-        multisample: Default::default(),
+        multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
         fragment: Some(wgpu::FragmentState {
             module,
             entry_point: Some("spark_fs"),
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
         }),
         multiview_mask: None,
         cache: None,
@@ -1256,25 +1699,30 @@ fn ensure_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, s: &mut
             None
         }
     };
-    s.pipelines.insert(format, pipeline);
+    s.pipelines.insert(key, pipeline);
 }
 
 
 
-/// Visible lights closest to the camera (by distance minus range), packed for the shader.
-fn collect_lights(scene: &spark_core::Scene) -> ([LightUniform; MAX_LIGHTS], usize) {
+/// Lights that can touch the view (sphere vs frustum), closest first, packed for the shader.
+/// Always sorted, ties broken by object index, so the chosen set does not flicker between frames.
+fn collect_lights(scene: &spark_core::Scene, mats: &[Mat4], vis: &[bool], planes: &[Vec4; 6]) -> ([LightUniform; MAX_LIGHTS], usize) {
     let cam = scene.camera.position;
-    let mut found: Vec<(f32, LightUniform)> = Vec::new();
+    let mut found: Vec<(f32, u32, LightUniform)> = Vec::new();
     for (id, obj) in scene.iter() {
         let Some(light) = obj.light else { continue };
-        if light.intensity <= 0.0 || !scene.is_visible(id) {
+        let i = id.index() as usize;
+        if light.intensity <= 0.0 || !vis[i] {
             continue;
         }
-        let m = scene.world_matrix(id);
+        let m = mats[i];
         let pos = m.transform_point3(Vec3::ZERO);
+        if sphere_outside(planes, pos, light.range) {
+            continue;
+        }
         let dir = m.transform_vector3(Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
         let c = light.color.to_linear();
-        let i = light.intensity;
+        let li = light.intensity;
         let (spot, outer, inner) = match light.kind {
             spark_core::LightKind::Point => (0.0, -2.0, -1.0),
             spark_core::LightKind::Spot { angle, softness } => {
@@ -1284,18 +1732,18 @@ fn collect_lights(scene: &spark_core::Scene) -> ([LightUniform; MAX_LIGHTS], usi
         };
         let u = LightUniform {
             position: pos.extend(light.range).to_array(),
-            color: [c[0] * i, c[1] * i, c[2] * i, spot],
+            color: [c[0] * li, c[1] * li, c[2] * li, spot],
             direction: dir.extend(outer).to_array(),
             params: [inner, 0.0, 0.0, 0.0],
         };
-        found.push((pos.distance(cam) - light.range, u));
+        found.push(((pos.distance(cam) - light.range).max(0.0), id.index(), u));
     }
     if found.len() > MAX_LIGHTS {
-        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     }
     let mut out = [LightUniform::zeroed(); MAX_LIGHTS];
     let n = found.len().min(MAX_LIGHTS);
-    for (slot, (_, u)) in out.iter_mut().zip(found) {
+    for (slot, (_, _, u)) in out.iter_mut().zip(found) {
         *slot = u;
     }
     (out, n)
@@ -1371,23 +1819,81 @@ fn uniform_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer
     })
 }
 
-fn object_buffer(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    capacity: usize,
-    stride: u64,
-    size: u64,
-) -> (wgpu::Buffer, wgpu::BindGroup) {
-    let buffer = uniform_buffer(device, "spark objects", stride * capacity as u64);
+fn object_buffer(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, capacity: usize) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let buffer = uniform_buffer(device, "spark objects", capacity as u64);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("spark objects"),
         layout,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
-            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &buffer, offset: 0, size: NonZeroU64::new(size) }),
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &buffer,
+                offset: 0,
+                size: NonZeroU64::new((MAX_INSTANCES * size_of::<ObjectUniform>()) as u64),
+            }),
         }],
     });
     (buffer, bind_group)
+}
+
+fn shadow_map(device: &wgpu::Device, size: u32) -> ShadowMap {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("spark shadow map"),
+        size: extent((size, size)),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SHADOW_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    ShadowMap { size, view: texture.create_view(&Default::default()), _texture: texture }
+}
+
+fn frame_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    buffer: &wgpu::Buffer,
+    shadow: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("spark frame"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(shadow) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
+}
+
+/// Orthographic sun view around the camera, snapped to shadow texels so edges don't shimmer.
+fn sun_view_proj(cam: &spark_core::Camera, sun_dir: Vec3, distance: f32, size: u32) -> Mat4 {
+    let dir = sun_dir.normalize_or(Vec3::NEG_Y);
+    let r = distance.max(1.0) * 0.5;
+    let center = cam.position + cam.forward() * r;
+    let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+    let view = spark_core::glam::camera::rh::view::look_to_mat4(Vec3::ZERO, dir, up);
+    let c = view.transform_point3(center);
+    let texel = 2.0 * r / size.max(1) as f32;
+    let (cx, cy) = ((c.x / texel).floor() * texel, (c.y / texel).floor() * texel);
+    // Casters up to 100 m towards the sun (tall buildings, mountains) still cast into the box.
+    let proj = spark_core::glam::camera::rh::proj::directx::orthographic(cx - r, cx + r, cy - r, cy + r, -c.z - r - 100.0, -c.z + r);
+    proj * view
+}
+
+/// Frustum planes (a, b, c, d) of a view-projection matrix (WebGPU depth 0..1), normals inward.
+fn frustum_planes(vp: &Mat4) -> [Vec4; 6] {
+    let r = [vp.row(0), vp.row(1), vp.row(2), vp.row(3)];
+    [r[3] + r[0], r[3] - r[0], r[3] + r[1], r[3] - r[1], r[2], r[3] - r[2]]
+}
+
+fn sphere_outside(planes: &[Vec4; 6], center: Vec3, radius: f32) -> bool {
+    planes.iter().any(|p| {
+        let len = p.truncate().length().max(1e-6);
+        (p.truncate().dot(center) + p.w) / len < -radius
+    })
 }
 
 fn vertex_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
