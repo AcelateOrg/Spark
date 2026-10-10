@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use mlua::{Lua, Table, UserDataRef, Value, Variadic, Vector};
 use spark_core::{
-    Color, Fog, Gamepad, ImageData, Key, Material, MeshData, MeshId, MouseButton, PadAxis, PadButton, SurfaceOpts, Vec3, World,
+    Color, Fog, Gamepad, ImageData, Key, Material, MeshData, MeshId, MouseButton, PadAxis, PadButton, SurfaceOpts, Vec3, Vertex, World,
 };
 
 use crate::convert::*;
@@ -233,6 +233,56 @@ fn install_assets(lua: &Lua, g: &Table) -> LuaResult<()> {
             let pts = points.iter().map(|p| to_vec3(p, "Mesh.triangles")).collect::<LuaResult<Vec<_>>>()?;
             with(lua, |w| Ok(LuaMesh(w.add_mesh(MeshData::from_triangles(&pts)))))
         })?,
+    )?;
+    mesh.set(
+        "custom",
+        lua.create_function(
+            |lua, (positions, indices, uvs, normals): (Vec<Value>, Vec<u32>, Option<Vec<f32>>, Option<Vec<Value>>)| {
+                let n = positions.len();
+                if n == 0 || indices.len() < 3 || indices.len() % 3 != 0 {
+                    return Err(rt(format!("Mesh.custom: need positions and 3*k indices, got {} / {}", n, indices.len())));
+                }
+                let pos = positions.iter().map(|p| to_vec3(p, "Mesh.custom")).collect::<LuaResult<Vec<_>>>()?;
+                let mut idx = Vec::with_capacity(indices.len());
+                for i in indices {
+                    if i == 0 || i as usize > n {
+                        return Err(rt(format!("Mesh.custom: index {} out of range 1..{}", i, n)));
+                    }
+                    idx.push(i - 1);
+                }
+                if let Some(u) = &uvs {
+                    if u.len() != n * 2 {
+                        return Err(rt(format!("Mesh.custom: uvs must have {} numbers, got {}", n * 2, u.len())));
+                    }
+                }
+                let nrm: Vec<Vec3> = match normals {
+                    Some(ns) => {
+                        if ns.len() != n {
+                            return Err(rt(format!("Mesh.custom: normals must have {} entries, got {}", n, ns.len())));
+                        }
+                        ns.iter().map(|p| to_vec3(p, "Mesh.custom").map(|v| v.normalize_or(Vec3::Y))).collect::<LuaResult<Vec<_>>>()?
+                    }
+                    None => {
+                        let mut acc = vec![Vec3::ZERO; n];
+                        for t in idx.chunks_exact(3) {
+                            let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+                            let f = (b - a).cross(c - a);
+                            for &k in t {
+                                acc[k as usize] += f;
+                            }
+                        }
+                        acc.into_iter().map(|v| v.normalize_or(Vec3::Y)).collect()
+                    }
+                };
+                let verts = (0..n)
+                    .map(|i| {
+                        let uv = uvs.as_ref().map(|u| [u[i * 2], u[i * 2 + 1]]).unwrap_or([0.0, 0.0]);
+                        Vertex::new(pos[i], nrm[i], uv)
+                    })
+                    .collect();
+                with(lua, |w| Ok(LuaMesh(w.add_mesh(MeshData::new(verts, idx)))))
+            },
+        )?,
     )?;
     g.set("Mesh", mesh)?;
 

@@ -269,6 +269,7 @@ Primitives are centered at the origin (a cube of size 1 spans -0.5..0.5). Same p
 | `Mesh.sphere(radius=0.5, segments=24)` | |
 | `Mesh.cylinder(radius=0.5, height=1, segments=24)` | |
 | `Mesh.triangles({p1, p2, p3, ...})` | counter-clockwise triangles, flat normals |
+| `Mesh.custom(positions, indices, uvs?, normals?)` | indexed mesh: `positions` = `{vector}`, `indices` = 1-based, 3 per counter-clockwise triangle, `uvs` = flat `{u1, v1, u2, v2, ...}`, `normals` = `{vector}` (smooth normals are computed when omitted). For swept tunnels, terrain, any generated geometry |
 | `Texture.load("img.png")` | PNG/JPEG, path relative to the script folder, cached |
 | `Texture.checker(a="white", b="gray", cells=8, size=64)` | |
 | `Texture.solid(color)` | |

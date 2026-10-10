@@ -352,6 +352,7 @@ declare Mesh: {
     sphere: (radius: number?, segments: number?) -> Mesh,
     cylinder: (radius: number?, height: number?, segments: number?) -> Mesh,
     triangles: (points: { vector }) -> Mesh,
+    custom: (positions: { vector }, indices: { number }, uvs: { number }?, normals: { vector }?) -> Mesh,
 }
 
 declare Texture: {
