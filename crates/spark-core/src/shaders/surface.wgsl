@@ -138,3 +138,47 @@ fn spark_fs(f: Fragment) -> @location(0) vec4<f32> {
     object = spark_objects[f.spark_instance];
     return SPARK_FRAGMENT(f);
 }
+
+// Depth of the surface as if the vertex shader had not moved it on screen (PS1 snapping, wobble):
+// the pixel's view ray hits the triangle's own plane (spanned by the interpolated world_pos).
+// Two nearly coplanar surfaces (a poster on a wall) then keep their true order instead of
+// flickering through each other while the camera moves.
+fn spark_plane_depth(f: Fragment) -> f32 {
+    let n = cross(dpdx(f.world_pos), dpdy(f.world_pos));
+    let raster = f.clip.z;
+    let len = length(n);
+    if (len < 1e-14) {
+        return raster;
+    }
+    let uv = f.clip.xy / frame.screen.xy;
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let a = frame.inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);   // near plane (reversed depth)
+    let b = frame.inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);   // far plane
+    let o = a.xyz / a.w;
+    let dir = normalize(b.xyz / b.w - o);
+    let nn = n / len;
+    let c = dot(dir, nn);
+    if (abs(c) < 0.02) {
+        return raster;   // seen edge-on: keep the rasterized depth
+    }
+    let p = o + dir * (dot(f.world_pos - o, nn) / c);
+    let clip = frame.view_proj * vec4<f32>(p, 1.0);
+    if (clip.w <= 0.0) {
+        return raster;
+    }
+    return clamp(clip.z / clip.w, 0.0, 1.0);
+}
+
+struct SparkStableOut {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
+@fragment
+fn spark_fs_stable(f: Fragment) -> SparkStableOut {
+    object = spark_objects[f.spark_instance];
+    var o: SparkStableOut;
+    o.depth = spark_plane_depth(f);
+    o.color = SPARK_FRAGMENT(f);
+    return o;
+}

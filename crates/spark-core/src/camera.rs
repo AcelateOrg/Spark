@@ -57,6 +57,29 @@ impl Camera {
         glam::camera::rh::proj::directx::perspective(self.fov.clamp(1.0, 179.0).to_radians(), aspect, self.near.max(0.0001), self.far)
     }
 
+    /// The projection the renderer draws with: reversed depth (near plane = 1, far plane = 0) for
+    /// a float depth buffer - far more precision in the distance than `projection` (no z-fighting).
+    pub fn render_projection(&self, aspect: f32) -> Mat4 {
+        let aspect = aspect.max(0.001);
+        let (n, f) = (self.near.max(0.0001), self.far.max(self.near.max(0.0001) + 0.001));
+        if let Some(h) = self.ortho {
+            let (hh, hw) = (h.max(0.001) * 0.5, h.max(0.001) * 0.5 * aspect);
+            return Mat4::from_cols(
+                glam::Vec4::new(1.0 / hw, 0.0, 0.0, 0.0),
+                glam::Vec4::new(0.0, 1.0 / hh, 0.0, 0.0),
+                glam::Vec4::new(0.0, 0.0, 1.0 / (f - n), 0.0),
+                glam::Vec4::new(0.0, 0.0, f / (f - n), 1.0),
+            );
+        }
+        let s = 1.0 / (self.fov.clamp(1.0, 179.0).to_radians() * 0.5).tan();
+        Mat4::from_cols(
+            glam::Vec4::new(s / aspect, 0.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, s, 0.0, 0.0),
+            glam::Vec4::new(0.0, 0.0, n / (f - n), -1.0),
+            glam::Vec4::new(0.0, 0.0, f * n / (f - n), 0.0),
+        )
+    }
+
     /// World point -> screen pixel (`screen` = output size, (0,0) = top-left) and depth 0..1.
     /// `None` when the point is behind the camera.
     pub fn world_to_screen(&self, point: Vec3, screen: Vec2) -> Option<(Vec2, f32)> {

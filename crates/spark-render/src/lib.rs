@@ -22,7 +22,8 @@ use wgpu::util::DeviceExt;
 
 pub use wgpu;
 
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+/// Scene depth: float, reversed (near = 1, far = 0, see `Camera::render_projection`).
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
@@ -1087,7 +1088,7 @@ impl Renderer {
         let scene = &world.scene;
         let cam = &scene.camera;
         let aspect = self.width as f32 / self.height as f32;
-        let (view, proj) = (cam.view(), cam.projection(aspect));
+        let (view, proj) = (cam.view(), cam.render_projection(aspect));
         let view_proj = proj * view;
         let planes = frustum_planes(&view_proj);
         let sun = scene.sun.color.to_linear();
@@ -1327,7 +1328,7 @@ impl Renderer {
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -1404,7 +1405,7 @@ impl Renderer {
                     color_attachments: &[],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &target.depth_view,
-                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
                         stencil_ops: None,
                     }),
                     timestamp_writes: None,
@@ -1678,7 +1679,7 @@ fn ensure_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, s: &mut
         depth_stencil: surface.then(|| wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(!transparent),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
             stencil: Default::default(),
             bias: Default::default(),
         }),
@@ -1883,7 +1884,7 @@ fn sun_view_proj(cam: &spark_core::Camera, sun_dir: Vec3, distance: f32, size: u
     proj * view
 }
 
-/// Frustum planes (a, b, c, d) of a view-projection matrix (WebGPU depth 0..1), normals inward.
+/// Frustum planes (a, b, c, d) of a view-projection matrix (WebGPU depth 0..1, either direction), normals inward.
 fn frustum_planes(vp: &Mat4) -> [Vec4; 6] {
     let r = [vp.row(0), vp.row(1), vp.row(2), vp.row(3)];
     [r[3] + r[0], r[3] - r[0], r[3] + r[1], r[3] - r[1], r[2], r[3] - r[2]]

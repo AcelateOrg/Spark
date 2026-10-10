@@ -36,7 +36,7 @@ fn input_color(uv: vec2<f32>) -> vec4<f32> {
 fn scene_depth(uv: vec2<f32>) -> f32 {
     let size = vec2<i32>(textureDimensions(depth_texture));
     let p = clamp(vec2<i32>(uv * vec2<f32>(size)), vec2<i32>(0), size - vec2<i32>(1));
-    return textureLoad(depth_texture, p, 0);
+    return 1.0 - textureLoad(depth_texture, p, 0);   // the buffer itself is reversed (near = 1)
 }
 
 // Distance from the camera plane in meters at uv.

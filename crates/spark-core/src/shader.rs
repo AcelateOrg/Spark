@@ -198,7 +198,13 @@ pub fn compose(code: &str, kind: ShaderKind) -> String {
         ShaderKind::Surface => {
             let vs = if defines_fn(code, "vertex") { "vertex" } else { "default_vertex" };
             let fs = if defines_fn(code, "fragment") { "fragment" } else { "default_fragment" };
-            s.push_str(&SURFACE.replace("SPARK_VERTEX", vs).replace("SPARK_FRAGMENT", fs));
+            let mut surface = SURFACE.replace("SPARK_VERTEX", vs).replace("SPARK_FRAGMENT", fs);
+            if vs == "vertex" {
+                // A custom vertex shader may move vertices on screen (snapping, wobble): the pipeline's
+                // `spark_fs` writes the depth of the unmoved surface (no z-fighting, see spark_plane_depth).
+                surface = surface.replace("fn spark_fs(", "fn spark_fs_raster(").replace("fn spark_fs_stable(", "fn spark_fs(");
+            }
+            s.push_str(&surface);
         }
         ShaderKind::Post => s.push_str(POST),
     }
