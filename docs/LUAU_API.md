@@ -613,6 +613,7 @@ save.set("settings", { volume = 0.8, fov = 75 })
 - `print(...)` -> engine log `[script] ...`
 - `dump_scene()` -> text with every object, position, rotation, bounds (same as `--dump-scene`)
 - `quit()`
+- `restart()` - clears the scene and runs `start()` again at the next frame (like a hot reload; works in shipped builds)
 
 ## Example
 

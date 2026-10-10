@@ -179,7 +179,7 @@ pub struct Light {
 }
 
 impl Light {
-    pub const MAX_VISIBLE: usize = 32;
+    pub const MAX_VISIBLE: usize = 64;
 
     pub fn point(color: Color, intensity: f32, range: f32) -> Self {
         Self { kind: LightKind::Point, color, intensity, range }

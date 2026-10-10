@@ -555,6 +555,7 @@ declare window: {
 }
 
 declare function quit(): ()
+declare function restart(): ()
 
 -- Callbacks the engine calls if the game defines them (globals in main.luau):
 --   function start() end              once, after every (re)load; runs as a task (may wait)

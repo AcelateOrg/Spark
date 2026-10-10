@@ -392,6 +392,7 @@ fn install_scene(lua: &Lua, g: &Table) -> LuaResult<()> {
     )?;
     g.set("dump_scene", lua.create_function(|lua, ()| with(lua, |w| Ok(w.scene.dump())))?)?;
     g.set("quit", lua.create_function(|lua, ()| with(lua, |w| Ok(w.quit())))?)?;
+    g.set("restart", lua.create_function(|lua, ()| with(lua, |w| Ok(w.request_restart())))?)?;
     g.set("time", lua.create_userdata(TimeRef)?)?;
     Ok(())
 }

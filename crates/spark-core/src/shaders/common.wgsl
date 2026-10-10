@@ -24,7 +24,7 @@ struct Frame {
     fog_color: vec4<f32>,   // rgb, linear
     fog: vec4<f32>,         // near, far, enabled (0 / 1)
     light_count: vec4<u32>, // x = number of entries in `lights`
-    lights: array<Light, 32>,
+    lights: array<Light, 64>,
     shadow_view_proj: mat4x4<f32>, // world -> sun shadow map clip space
     shadow: vec4<f32>,      // enabled (0 / 1), 1 / map size, normal offset (m), shadow distance (m)
 };

@@ -281,7 +281,15 @@ impl ScriptGame {
         if self.frame_started == world.time.frame {
             return;
         }
-        self.poll_files(world);
+        if world.take_restart() {
+            // restart() from the script: same as a hot reload, works in shipped builds too
+            log::info!("restart requested by the script");
+            self.shader_mtimes.clear();
+            self.shader_error = None;
+            self.load(world);
+        } else {
+            self.poll_files(world);
+        }
         self.frame_started = world.time.frame;
         let dt = world.time.dt as f64;
         self.run(world, |lua| runtime::begin_frame(lua, dt));
