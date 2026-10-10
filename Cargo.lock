@@ -2751,8 +2751,10 @@ dependencies = [
 name = "spark-cli"
 version = "0.1.0"
 dependencies = [
+ "image",
  "mlua",
  "spark",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

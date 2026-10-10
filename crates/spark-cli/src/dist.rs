@@ -70,6 +70,22 @@ fn build(args: &[String]) -> Result<(), String> {
     if cfg!(windows) && !set_gui_subsystem(&mut exe) {
         eprintln!("spark build: warning: could not hide the console window (unknown exe format)");
     }
+    // game.toml `icon`: also the icon of the exe file (Windows) / the .app (macOS).
+    let icon = m.icon.as_ref().and_then(|p| match crate::icon::load(&dir.join(p)) {
+        Ok(img) => Some(img),
+        Err(e) => {
+            eprintln!("spark build: warning: icon: {e}");
+            None
+        }
+    });
+    if cfg!(windows) {
+        if let Some(img) = &icon {
+            match crate::icon::set_exe_icon(&exe, img) {
+                Ok(with_icon) => exe = with_icon,
+                Err(e) => eprintln!("spark build: warning: could not set the exe icon: {e}"),
+            }
+        }
+    }
 
     let mut files = Vec::new();
     collect(&dir, &dir, &m, &mut files)?;
@@ -124,7 +140,7 @@ fn build(args: &[String]) -> Result<(), String> {
 
     if app {
         if cfg!(target_os = "macos") {
-            let bundle = make_app_bundle(&out_root, &name, &shipped, &title, loose)?;
+            let bundle = make_app_bundle(&out_root, &name, &shipped, &title, loose, icon.as_ref())?;
             println!("spark build: {}", bundle.display());
             shipped = PathBuf::from(format!("{name}.app"));
         } else {
@@ -170,7 +186,7 @@ fn write_exe(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// `<name>.app/Contents/{Info.plist, MacOS/<name>}` around the built executable (or loose folder).
-fn make_app_bundle(out_root: &Path, name: &str, shipped: &Path, title: &str, loose: bool) -> Result<PathBuf, String> {
+fn make_app_bundle(out_root: &Path, name: &str, shipped: &Path, title: &str, loose: bool, icon: Option<&image::RgbaImage>) -> Result<PathBuf, String> {
     let bundle = out_root.join(format!("{name}.app"));
     if bundle.exists() {
         std::fs::remove_dir_all(&bundle).map_err(|e| format!("cannot clear '{}': {e}", bundle.display()))?;
@@ -188,11 +204,24 @@ fn make_app_bundle(out_root: &Path, name: &str, shipped: &Path, title: &str, loo
     } else {
         std::fs::rename(&src, macos.join(name)).map_err(|e| format!("cannot move into the bundle: {e}"))?;
     }
-    write_file(&bundle.join("Contents/Info.plist"), info_plist(name, title).as_bytes())?;
+    let has_icon = match icon.map(crate::icon::icns) {
+        Some(Ok(data)) => {
+            let res = bundle.join("Contents/Resources");
+            std::fs::create_dir_all(&res).map_err(|e| format!("cannot create '{}': {e}", res.display()))?;
+            write_file(&res.join("icon.icns"), &data)?;
+            true
+        }
+        Some(Err(e)) => {
+            eprintln!("spark build: warning: icon: {e}");
+            false
+        }
+        None => false,
+    };
+    write_file(&bundle.join("Contents/Info.plist"), info_plist(name, title, has_icon).as_bytes())?;
     Ok(bundle)
 }
 
-fn info_plist(name: &str, title: &str) -> String {
+fn info_plist(name: &str, title: &str, icon: bool) -> String {
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let id: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
     format!(
@@ -208,12 +237,13 @@ fn info_plist(name: &str, title: &str) -> String {
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>{icon}
 </dict>
 </plist>
 "#,
         title = esc(title),
         exe = esc(name),
+        icon = if icon { "\n  <key>CFBundleIconFile</key><string>icon</string>" } else { "" },
     )
 }
 

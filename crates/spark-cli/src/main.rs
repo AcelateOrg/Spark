@@ -13,6 +13,7 @@
 
 mod check;
 mod dist;
+mod icon;
 mod manifest;
 mod new;
 mod update;

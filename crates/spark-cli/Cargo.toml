@@ -21,3 +21,8 @@ gui = []
 engine = { package = "spark", path = "../spark" }
 # `spark check`: compiles every .luau module (syntax check without running it).
 mlua.workspace = true
+# `spark build`: exe / .app icons from game.toml `icon`.
+image.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader", "Win32_Foundation"] }
