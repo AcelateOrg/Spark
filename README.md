@@ -188,8 +188,8 @@ In a window: F1 = debug overlay, F12 = screenshot, F11 / Alt+Enter = fullscreen.
 | Crate | Role |
 |---|---|
 | `spark` | facade: `App`, prelude, re-exports - use this one from Rust |
-| `spark-core` | world data without GPU: scene, assets, materials, input, time, events, scheduler, audio queue, virtual file system |
-| `spark-render` | wgpu renderer: surface / post shaders, 2D canvas, windowed and headless, screenshots |
+| `spark-core` | world data without GPU: scene, assets, materials, sky, UI widget state, input, time, events, scheduler, audio queue, virtual file system, WGSL shader preludes |
+| `spark-render` | wgpu renderer: surface / post shaders, PBR, sky, built-in post effects, 2D canvas, windowed and headless, screenshots |
 | `spark-window` | winit window and input mapping, gamepads (gilrs) |
 | `spark-audio` | kira audio backend |
 | `spark-physics` | rapier3d backend |
