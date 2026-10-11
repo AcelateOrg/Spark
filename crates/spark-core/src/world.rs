@@ -41,6 +41,8 @@ pub struct World {
     pub window: WindowSettings,
     /// Debug overlay (FPS, GPU, scene stats). Toggle with F1 in the runner.
     pub debug: crate::debug::DebugOverlay,
+    /// Immediate-mode UI state (buttons, sliders, panels).
+    pub ui: crate::ui::Ui,
     quit: bool,
 }
 
@@ -100,5 +102,6 @@ impl World {
         self.render = RenderSettings::default();
         self.canvas.reset();
         self.debug = crate::debug::DebugOverlay::default();
+        self.ui = crate::ui::Ui::default();
     }
 }

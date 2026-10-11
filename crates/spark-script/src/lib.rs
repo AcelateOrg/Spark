@@ -20,6 +20,7 @@ mod debug_api;
 mod draw;
 mod flow;
 mod light;
+mod ui_api;
 mod model;
 mod modules;
 mod physics;
