@@ -616,7 +616,7 @@ impl std::ops::IndexMut<ObjectId> for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::Body;
+    use crate::physics::{Body, BodyKind};
 
     #[test]
     fn clear_objects_invalidates_ids() {
@@ -669,5 +669,60 @@ mod tests {
         assert!((half - 0.5).abs() < 1e-5);
         s[id].position = Vec3::new(10.0, 0.0, 0.0); // teleport by game code: no smear
         assert_eq!(s[id].render_local_matrix(0.5).w_axis.x, 10.0);
+    }
+
+    #[test]
+    fn destroyed_object_returns_none() {
+        let mut s = Scene::new();
+        let a = s.add(Object::empty());
+        assert!(s.get(a).is_some());
+        assert!(s.destroy(a));
+        assert!(s.get(a).is_none());
+        assert!(s.get_mut(a).is_none());
+    }
+
+    #[test]
+    fn set_parent_cycle_detected() {
+        let mut s = Scene::new();
+        let a = s.add(Object::empty());
+        let b = s.add(Object::empty());
+        s.set_parent(b, Some(a)).unwrap();
+        // a is parent of b, so making a a child of b would create a cycle
+        let err = s.set_parent(a, Some(b));
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("cycle"));
+    }
+
+    #[test]
+    fn interpolation_teleport_detection() {
+        let mut s = Scene::new();
+        let mut obj = Object::empty();
+        obj.body = Some(Body { kind: BodyKind::Dynamic, ..Default::default() });
+        let id = s.add(obj);
+        s.begin_interp_step();
+        s.end_interp_step();
+        // Teleport: change position after end_interp_step
+        s[id].position = Vec3::new(100.0, 0.0, 0.0);
+        // render_local_matrix should NOT interpolate (teleport detected)
+        let m = s[id].render_local_matrix(0.5);
+        let p = m.w_axis.truncate();
+        assert_eq!(p, Vec3::new(100.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn interpolation_normal_motion() {
+        let mut s = Scene::new();
+        let mut obj = Object::empty();
+        obj.body = Some(Body { kind: BodyKind::Dynamic, ..Default::default() });
+        obj.position = Vec3::new(0.0, 0.0, 0.0);
+        let id = s.add(obj);
+        s.begin_interp_step();
+        // Simulate physics moving the object
+        s[id].position = Vec3::new(10.0, 0.0, 0.0);
+        s.end_interp_step();
+        // At alpha=0.5, should be at (5, 0, 0)
+        let m = s.get(id).unwrap().render_local_matrix(0.5);
+        let p = m.w_axis.truncate();
+        assert!((p.x - 5.0).abs() < 1e-3, "expected 5.0, got {}", p.x);
     }
 }

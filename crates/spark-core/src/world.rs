@@ -39,6 +39,8 @@ pub struct World {
     pub animator: Animator,
     /// Fullscreen / title requests for the window (ignored in headless runs).
     pub window: WindowSettings,
+    /// Debug overlay (FPS, GPU, scene stats). Toggle with F1 in the runner.
+    pub debug: crate::debug::DebugOverlay,
     quit: bool,
 }
 
@@ -97,5 +99,6 @@ impl World {
         self.animator.clear();
         self.render = RenderSettings::default();
         self.canvas.reset();
+        self.debug = crate::debug::DebugOverlay::default();
     }
 }

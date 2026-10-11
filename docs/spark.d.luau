@@ -554,6 +554,24 @@ declare window: {
     height: number,
 }
 
+-- Spark's debug overlay merged with the standard Luau debug library.
+declare debug: {
+    enabled: boolean,
+    hotkey: boolean,
+    show_fps: boolean,
+    show_gpu: boolean,
+    show_scene: boolean,
+    show_physics: boolean,
+    fps: number, -- read-only
+    frame_time: number, -- read-only (ms)
+    toggle: () -> boolean,
+    avg_frame_ms: () -> number,
+    add_line: (text: string, color: ColorLike?) -> (),
+    clear_lines: () -> (),
+    traceback: (message: string?, level: number?) -> string,
+    info: (...any) -> ...any,
+}
+
 declare function quit(): ()
 
 -- Callbacks the engine calls if the game defines them (globals in main.luau):

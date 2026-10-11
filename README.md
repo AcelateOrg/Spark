@@ -181,7 +181,7 @@ spark --version
 
 Flags for every game: `--headless`, `--frames N`, `--screenshot PATH`, `--dump-scene`, `--size WxH`, `--fixed-dt S`,
 `--no-vsync`, `--splash` / `--no-splash`, `--fullscreen`, `--windowed`, `--help`.
-In a window: F12 = screenshot, F11 / Alt+Enter = fullscreen. Environment: `RUST_LOG=debug`, `WGPU_BACKEND=dx12|vulkan|metal|gl`.
+In a window: F1 = debug overlay, F12 = screenshot, F11 / Alt+Enter = fullscreen. Environment: `RUST_LOG=debug`, `WGPU_BACKEND=dx12|vulkan|metal|gl`.
 
 ## Architecture
 

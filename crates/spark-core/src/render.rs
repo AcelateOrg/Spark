@@ -118,4 +118,18 @@ mod tests {
         r.scale = 0.5;
         assert_eq!(r.internal_size(1280, 720), (640, 360));
     }
+
+    #[test]
+    fn internal_size_scale_clamped() {
+        let mut r = RenderSettings::default();
+        r.scale = 0.01; // below minimum 0.05
+        let (w, h) = r.internal_size(1280, 720);
+        assert!(w >= 1 && h >= 1); // clamped, not zero
+    }
+
+
+    #[test]
+    fn pass_size_default_is_screen() {
+        assert_eq!(PassSize::default(), PassSize::Screen);
+    }
 }

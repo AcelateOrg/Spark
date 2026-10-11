@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -33,7 +34,8 @@ const GLYPH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Pipeline variant bits: blend mode (0 opaque, 1 alpha, 2 additive) | double-sided.
-/// Objects per instanced draw: `array<Object, 64>` uniform window (11 KB, fits every GPU incl. GL).
+/// Objects per instanced draw: `array<Object, 64>` uniform window (fits every GPU incl. GL).
+/// Must match the array length in `surface.wgsl` and `shadow.wgsl`.
 const MAX_INSTANCES: usize = 64;
 const VARIANT_ALPHA: u8 = 1;
 const VARIANT_ADDITIVE: u8 = 2;
@@ -307,6 +309,9 @@ pub struct Renderer {
     scratch: Vec<u8>,
     world_matrices: Vec<Mat4>,
     world_visible: Vec<bool>,
+    device_lost: Arc<AtomicBool>,
+    /// Numbers about the last frame drawn by [`Renderer::render`] (shown by the debug overlay).
+    last_stats: FrameStats,
 }
 
 fn sanitize_backend_env() {
@@ -385,6 +390,46 @@ impl Renderer {
         }
     }
 
+    /// Numbers about the last rendered frame.
+    pub fn last_stats(&self) -> FrameStats {
+        self.last_stats
+    }
+
+    /// Whether the GPU device was lost (driver crash, TDR, etc.).
+    pub fn is_device_lost(&self) -> bool {
+        self.device_lost.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Recreates device, queue and GPU resources after a device loss (the window surface is
+    /// reconfigured). Assets are re-uploaded on the next frame.
+    pub fn recover(&mut self) -> Result<(), String> {
+        log::info!("attempting GPU device recovery...");
+        self.device_lost.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let surface = self.surface.take();
+        let surface_factory = self.surface_factory.take();
+        let width = self.width;
+        let height = self.height;
+
+        // Move the instance out (replace with a dummy that will be discarded on overwrite).
+        let dummy = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance = std::mem::replace(&mut self.instance, dummy);
+
+        let adapter = request_adapter(&instance, surface.as_ref().map(|s| &s.surface))?;
+        let (device, queue) = request_device(&adapter)?;
+
+        let mut new = Self::build(instance, &adapter, device, queue, width, height);
+        new.surface = surface;
+        new.surface_factory = surface_factory;
+
+        if let Some(s) = &new.surface {
+            s.surface.configure(&new.device, &s.config);
+        }
+
+        *self = new;
+        Ok(())
+    }
+
     /// Draws the world to the window.
     pub fn render(&mut self, world: &World) -> Result<FrameStats, String> {
         self.render_frame(world, false).map(|(stats, _)| stats)
@@ -402,6 +447,9 @@ impl Renderer {
     }
 
     fn render_frame(&mut self, world: &World, capture: bool) -> Result<(FrameStats, Option<ImageData>), String> {
+        if self.is_device_lost() {
+            return Err("GPU device lost".into());
+        }
         let Some(state) = &self.surface else {
             return Err("render(): this renderer is headless, use screenshot()".into());
         };
@@ -430,6 +478,7 @@ impl Renderer {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("spark frame") });
         let mut stats = self.draw_scene(&mut encoder, world);
         stats.post_passes = self.draw_post(&mut encoder, &view, view_format, world);
+        self.last_stats = stats;
         if !capture {
             self.queue.submit([encoder.finish()]);
             self.queue.present(frame);
@@ -437,7 +486,8 @@ impl Renderer {
         }
         self.ensure_capture();
         self.ensure_canvas_pipeline(COLOR_FORMAT);
-        let target = self.capture.take().expect("capture target");
+        // ensure_capture() was just called, so self.capture is Some.
+        let target = self.capture.take().ok_or_else(|| "capture target was not ensured".to_string())?;
         self.draw_post(&mut encoder, &target.view, COLOR_FORMAT, world);
         self.capture = Some(target);
         let image = self.read_capture(encoder);
@@ -465,11 +515,15 @@ impl Renderer {
 
     /// Draws the world and returns the final image (same as what the window shows).
     pub fn screenshot(&mut self, world: &World) -> Result<ImageData, String> {
+        if self.is_device_lost() {
+            return Err("GPU device lost".into());
+        }
         self.ensure_capture();
         self.ensure_canvas_pipeline(COLOR_FORMAT);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("spark screenshot") });
-        self.draw_scene(&mut encoder, world);
-        let capture = self.capture.take().expect("capture target");
+        self.last_stats = self.draw_scene(&mut encoder, world);
+        // ensure_capture() was just called, so self.capture is Some.
+        let capture = self.capture.take().ok_or_else(|| "capture target was not ensured".to_string())?;
         self.draw_post(&mut encoder, &capture.view, COLOR_FORMAT, world);
         self.capture = Some(capture);
         self.read_capture(encoder)
@@ -477,7 +531,8 @@ impl Renderer {
 
     /// Submits `encoder` plus a copy of the capture target and reads the pixels back.
     fn read_capture(&mut self, mut encoder: wgpu::CommandEncoder) -> Result<ImageData, String> {
-        let capture = self.capture.as_ref().expect("capture target");
+        // caller restores self.capture = Some(...) before invoking read_capture.
+        let capture = self.capture.as_ref().ok_or_else(|| "capture target was not ensured".to_string())?;
         let size = capture.size;
         let unpadded = size.0 * 4;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -536,6 +591,26 @@ impl Renderer {
             device_type: format!("{:?}", ai.device_type),
             driver: format!("{} {}", ai.driver, ai.driver_info).trim().to_string(),
         };
+
+        // GPU error handling: log uncaptured errors instead of panicking.
+        device.on_uncaptured_error(Arc::new(|e| {
+            match e {
+                wgpu::Error::Validation { description, .. } => log::error!("GPU validation error: {description}"),
+                wgpu::Error::OutOfMemory { source, .. } => log::error!("GPU out of memory: {source}"),
+                wgpu::Error::Internal { description, .. } => log::error!("GPU internal error: {description}"),
+            }
+        }));
+
+        // Device loss tracking: set a flag the renderer can check before drawing.
+        let device_lost = Arc::new(AtomicBool::new(false));
+        device.set_device_lost_callback({
+            let flag = device_lost.clone();
+            Box::new(move |reason, msg| {
+                log::error!("GPU device lost: {reason:?}: {msg}");
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        });
+
 
         let adapter_formats = [COLOR_FORMAT, DEPTH_FORMAT]
             .into_iter()
@@ -715,6 +790,7 @@ impl Renderer {
             upload_texture(&device, &queue, &texture_layout, &texture_samplers, &ImageData::solid(Color::WHITE), COLOR_FORMAT, false);
 
         let builtin = |name: &str, code: &str| {
+            // built-in shaders are known-good at compile time.
             let data = ShaderData::compile(name, code).expect("built-in shader compiles");
             gpu_shader(&device, &shader_layout, &texture_samplers, &white, &[], &data)
         };
@@ -804,6 +880,8 @@ impl Renderer {
             scratch: Vec::new(),
             world_matrices: Vec::new(),
             world_visible: Vec::new(),
+            device_lost,
+            last_stats: FrameStats::default(),
         }
     }
 
@@ -835,6 +913,7 @@ impl Renderer {
             self.assets_generation = assets.generation();
         }
         while self.meshes.len() < assets.mesh_count() {
+            // loop condition guarantees mesh id < assets.mesh_count().
             let data = assets.mesh(MeshId(self.meshes.len() as u32)).expect("mesh id in range");
             let gpu = (!data.vertices.is_empty() && !data.indices.is_empty()).then(|| GpuMesh {
                 vertices: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -870,6 +949,7 @@ impl Renderer {
         }
         let max = self.device.limits().max_texture_dimension_2d;
         while self.textures.len() < assets.texture_count() {
+            // loop condition guarantees texture id < assets.texture_count().
             let image = assets.texture(TextureId(self.textures.len() as u32)).expect("texture id in range");
             let gpu = if image.width == 0 || image.height == 0 || image.width > max || image.height > max {
                 log::error!("texture {}x{} is not supported (max {max}x{max}); using magenta", image.width, image.height);
@@ -1015,6 +1095,7 @@ impl Renderer {
     /// GPU copies of the game's shaders: (re)built when added / hot-reloaded, params uploaded every frame.
     fn sync_shaders(&mut self, assets: &Assets) {
         for i in 0..assets.shader_count() {
+            // loop bound is assets.shader_count(), so id is in range.
             let data = assets.shader(spark_core::ShaderId(i as u32)).expect("shader id in range");
             if self.shaders.get(i).is_none_or(|s| s.version != data.version) {
                 let g = gpu_shader(&self.device, &self.shader_layout, &self.texture_samplers, &self.white, &self.textures, data);
@@ -1062,6 +1143,7 @@ impl Renderer {
     }
 
     fn pipeline(&self, r: ShaderRef, key: PipelineKey) -> &wgpu::RenderPipeline {
+        // caller must ensure_shader_pipeline() before calling pipeline().
         self.shader(r).pipelines[&key].as_ref().expect("pipeline ensured")
     }
 
@@ -1082,7 +1164,7 @@ impl Renderer {
         let rs = &world.render;
         let samples = self.supported_samples(rs.msaa.max(1));
         self.ensure_scene_target(rs.internal_size(self.width, self.height), samples);
-        let internal = self.scene_target.as_ref().expect("scene target").size;
+        let internal = self.scene_target.as_ref().expect("scene target").size; // ensure_scene_target() was called
 
         let scene = &world.scene;
         let cam = &scene.camera;
@@ -1251,7 +1333,7 @@ impl Renderer {
                     && (shadow_part || (b.shader == c.shader && b.variant == c.variant && b.texture == c.texture))
             });
             if same {
-                list.last_mut().expect("batch").count += 1;
+                list.last_mut().expect("batch").count += 1; // checked is_some() above
             } else {
                 scratch.resize(scratch.len().div_ceil(align) * align, 0);
                 list.push(Batch3 {
@@ -1300,14 +1382,14 @@ impl Renderer {
             pass.set_bind_group(0, &self.shadow_bind_group, &[]);
             for b in &shadow_batches {
                 pass.set_bind_group(1, &self.object_bind_group, &[b.offset]);
-                let mesh = self.meshes[b.mesh].as_ref().expect("uploaded mesh");
+                let mesh = self.meshes[b.mesh].as_ref().expect("uploaded mesh"); // candidates filtered to have uploaded meshes
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..b.count);
             }
         }
 
-        let target = self.scene_target.as_ref().expect("scene target");
+        let target = self.scene_target.as_ref().expect("scene target"); // ensure_scene_target() was called
         let bg = scene.background.to_linear();
         {
             let (color_view, resolve, depth_view) = match &target.msaa {
@@ -1348,7 +1430,7 @@ impl Renderer {
                     last_shader = Some(b.shader);
                 }
                 pass.set_bind_group(1, &self.object_bind_group, &[b.offset]);
-                let mesh = self.meshes[b.mesh].as_ref().expect("uploaded mesh");
+                let mesh = self.meshes[b.mesh].as_ref().expect("uploaded mesh"); // candidates filtered to have uploaded meshes
                 if last_texture != Some(b.texture) {
                     let tex = b.texture.map(|t| &self.textures[t]).unwrap_or(&self.white);
                     pass.set_bind_group(2, if nearest { &tex.nearest } else { &tex.linear }, &[]);
@@ -1397,7 +1479,7 @@ impl Renderer {
                 });
                 self.depth_resolve_pipelines.insert(samples, p);
             }
-            let target = self.scene_target.as_ref().expect("scene target");
+            let target = self.scene_target.as_ref().expect("scene target"); // ensure_scene_target() was called
             if let Some(bg) = &target.depth_resolve {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("spark depth resolve"),
@@ -1421,7 +1503,7 @@ impl Renderer {
         self.prepare_canvas(&world.canvas);
         let scene_layer = world.canvas.layer_data(Layer::Scene);
         if !scene_layer.is_empty() {
-            let target = self.scene_target.as_ref().expect("scene target");
+            let target = self.scene_target.as_ref().expect("scene target"); // ensure_scene_target() was called
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("spark canvas scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1450,7 +1532,7 @@ impl Renderer {
         world: &World,
     ) -> u32 {
         let output = (self.width, self.height);
-        let scene_size = self.scene_target.as_ref().expect("scene target").size;
+        let scene_size = self.scene_target.as_ref().expect("scene target").size; // ensure_scene_target() was called
         let mut chain: Vec<(ShaderRef, (u32, u32))> = Vec::new();
         for p in &world.render.post {
             let Some(r) = self.asset_shader(Some(p.shader), ShaderKind::Post) else { continue };
@@ -1504,7 +1586,7 @@ impl Renderer {
             TextureFilter::Nearest => &self.texture_samplers[2],
             TextureFilter::Linear => &self.texture_samplers[3],
         };
-        let target = self.scene_target.as_ref().expect("scene target");
+        let target = self.scene_target.as_ref().expect("scene target"); // ensure_scene_target() was called
         let mut input_size = scene_size;
         for (i, &(r, size)) in chain.iter().enumerate() {
             let last = i + 1 == n;
@@ -1750,13 +1832,51 @@ fn collect_lights(scene: &spark_core::Scene, mats: &[Mat4], vis: &[bool], planes
 }
 
 fn request_adapter(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<wgpu::Adapter, String> {
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        force_fallback_adapter: false,
-        compatible_surface: surface,
-        ..Default::default()
-    }))
-    .map_err(|e| format!("no compatible GPU found: {e}"))
+    let mut tried: Vec<&str> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for (pref, fallback, label) in [
+        (wgpu::PowerPreference::HighPerformance, false, "HighPerformance"),
+        (wgpu::PowerPreference::LowPower, false, "LowPower"),
+        (wgpu::PowerPreference::None, true, "force_fallback_adapter"),
+    ] {
+        tried.push(label);
+        match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: pref,
+            force_fallback_adapter: fallback,
+            compatible_surface: surface,
+            ..Default::default()
+        })) {
+            Ok(adapter) => {
+                let info = adapter.get_info();
+                log::info!("GPU adapter selected via {label}: {} ({:?})", info.name, info.backend);
+                return Ok(adapter);
+            }
+            Err(e) => {
+                log::warn!("request_adapter {label} failed: {e}");
+                errors.push(format!("{label}: {e}"));
+            }
+        }
+    }
+
+    let available: Vec<String> = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+        .iter()
+        .map(|a| {
+            let info = a.get_info();
+            format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type)
+        })
+        .collect();
+
+    Err(format!(
+        "no compatible GPU found.\n\
+         Tried: {}\n\
+         Errors: {}\n\
+         Available GPUs: {}\n\
+         Hint: install up-to-date GPU drivers, or try WGPU_BACKEND=gl for the OpenGL backend.",
+        tried.join(", "),
+        errors.join("; "),
+        if available.is_empty() { "none".into() } else { available.join(", ") },
+    ))
 }
 
 fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), String> {
@@ -2061,4 +2181,64 @@ fn outside_frustum(mvp: &Mat4, bounds: &Aabb) -> bool {
         out[5] &= c.z > c.w;
     }
     out.iter().any(|&o| o)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spark_core::glam::Quat;
+    use spark_core::{Material, MeshData};
+
+    #[test]
+    fn uniforms_are_16_byte_aligned() {
+        assert_eq!(size_of::<FrameUniform>() % 16, 0);
+        assert_eq!(size_of::<ObjectUniform>() % 16, 0);
+        // 64 objects per draw must fit the 16 KB uniform binding every backend (incl. GL) offers.
+        assert!(size_of::<ObjectUniform>() * MAX_INSTANCES <= 16 * 1024);
+    }
+
+    #[test]
+    fn normal_matrix_keeps_normals_perpendicular_under_shear() {
+        // Child rotated 45° under a parent scaled (3, 1, 1): the world matrix has shear.
+        let parent = Mat4::from_scale(Vec3::new(3.0, 1.0, 1.0));
+        let child = Mat4::from_quat(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4));
+        let model = parent * child;
+        let nm = normal_matrix(&model);
+        // A surface with local normal +Y contains the local +X direction.
+        let tangent = model.transform_vector3(Vec3::X);
+        let normal = nm.transform_vector3(Vec3::Y).normalize();
+        assert!(tangent.dot(normal).abs() < 1e-5, "normal not perpendicular: {}", tangent.dot(normal));
+    }
+
+    #[test]
+    fn normal_matrix_degenerate_is_identity() {
+        assert_eq!(normal_matrix(&Mat4::from_scale(Vec3::ZERO)), Mat4::IDENTITY);
+    }
+
+    /// Real GPU round trip: a white unlit cube in front of the camera ends up in the image.
+    /// Skipped when the machine has no GPU / software Vulkan (CI installs lavapipe).
+    #[test]
+    fn headless_render_draws_scene() {
+        let mut r = match Renderer::new_headless(64, 64) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipping GPU test: {e}");
+                return;
+            }
+        };
+        let mut world = World::default();
+        world.scene.background = Color::BLACK;
+        let cube = world.add_mesh(MeshData::cube(2.0));
+        world.spawn(cube, Material::unlit(Color::WHITE));
+        world.scene.camera.position = Vec3::new(0.0, 0.0, 4.0);
+        world.scene.camera.look_at(Vec3::ZERO);
+        let image = r.screenshot(&world).expect("screenshot");
+        assert_eq!((image.width, image.height), (64, 64));
+        let center = image.pixel(32, 32);
+        let corner = image.pixel(0, 0);
+        assert!(center[0] > 200, "cube not drawn: center = {center:?}");
+        assert!(corner[0] < 30, "background not cleared: corner = {corner:?}");
+        assert!(r.last_stats().draw_calls >= 1);
+        assert!(!r.is_device_lost());
+    }
 }

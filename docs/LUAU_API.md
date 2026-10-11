@@ -608,6 +608,20 @@ save.set("settings", { volume = 0.8, fov = 75 })
 
 - `window.fullscreen` (read/write, borderless), `window.title` (read/write; nil = game title), `window.width`, `window.height` (pixels, read-only)
 
+## Debug overlay
+
+F1 shows an overlay with FPS, frame time (min / max / average over 120 frames), GPU name, object count,
+draw calls and triangles of the last frame. The same `debug` table still holds the standard Luau
+library (`debug.traceback()`, `debug.info(...)`).
+
+- `debug.enabled` (read/write), `debug.toggle()` -> new state
+- `debug.hotkey = false`: F1 no longer toggles the overlay (games that use F1 themselves)
+- `debug.show_fps`, `debug.show_gpu`, `debug.show_scene`, `debug.show_physics` (read/write sections)
+- `debug.fps`, `debug.frame_time` (ms, read-only), `debug.avg_frame_ms()`
+- `debug.add_line(text, color="white")`: extra line for this frame only (call it every frame); `debug.clear_lines()`
+
+Unknown fields and writes to read-only ones are errors.
+
 ## Misc
 
 - `print(...)` -> engine log `[script] ...`

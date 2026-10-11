@@ -459,6 +459,7 @@ pub(crate) fn install(lua: &Lua) -> LuaResult<()> {
     crate::save::install(lua, &g)?;
     crate::shader::install(lua, &g)?;
     crate::tween::install(lua)?;
+    crate::debug_api::install(lua)?;
     g.set("window", lua.create_userdata(LuaWindow)?)?;
     Ok(())
 }

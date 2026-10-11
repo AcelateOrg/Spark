@@ -147,3 +147,38 @@ impl Material {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_blend_auto_alpha() {
+        let m = Material::color(Color::rgba(1.0, 1.0, 1.0, 0.5));
+        assert_eq!(m.effective_blend(), BlendMode::Alpha);
+    }
+
+    #[test]
+    fn effective_blend_auto_opaque() {
+        let m = Material::color(Color::WHITE);
+        assert_eq!(m.effective_blend(), BlendMode::Opaque);
+    }
+
+    #[test]
+    fn blend_parse_roundtrip() {
+        for &mode in &[BlendMode::Auto, BlendMode::Opaque, BlendMode::Alpha, BlendMode::Additive] {
+            assert_eq!(BlendMode::parse(mode.name()), Some(mode));
+        }
+    }
+
+    #[test]
+    fn material_builder_chain() {
+        let m = Material::color(Color::RED)
+            .with_blend(BlendMode::Additive)
+            .with_double_sided(true)
+            .with_tiling(2.0, 3.0);
+        assert_eq!(m.blend, BlendMode::Additive);
+        assert!(m.double_sided);
+        assert_eq!(m.tiling, Vec2::new(2.0, 3.0));
+    }
+}
