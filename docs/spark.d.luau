@@ -97,7 +97,16 @@ type SpawnProps = {
     blend: BlendMode?,
     double_sided: boolean?,
     cast_shadow: boolean?,
+    pbr: boolean?,
+    metallic: number?,
+    roughness: number?,
+    emissive: ColorLike?,
+    normal_map: (Texture | string | false)?,
+    lod: { LodLevel }?,
 }
+
+-- `{distance, mesh}`: from `distance` meters away the object draws `mesh`.
+type LodLevel = { number | Mesh }
 
 type Hit = { object: Object, point: vector, normal: vector, distance: number }
 type CollisionInfo = { speed: number, sensor: boolean }
@@ -160,6 +169,15 @@ declare extern type Material with
     blend: BlendMode
     double_sided: boolean
     cast_shadow: boolean
+    pbr: boolean
+    metallic: number
+    roughness: number
+    emissive: Color
+    normal_map: Texture?
+    function with_metallic(self, metallic: number): Material
+    function with_roughness(self, roughness: number): Material
+    function with_emissive(self, color: ColorLike): Material
+    function with_normal_map(self, texture: (Texture | string)?): Material
     function with_shader(self, shader: Shader?): Material
     function with_data(self, a: number, b: number?, c: number?, d: number?): Material
 end
@@ -252,6 +270,12 @@ declare extern type Object with
     blend: BlendMode
     double_sided: boolean
     cast_shadow: boolean
+    pbr: boolean
+    metallic: number
+    roughness: number
+    emissive: Color
+    normal_map: Texture?
+    lod: { LodLevel }
     color: Color
     material: Material?
     mesh: Mesh?
@@ -366,6 +390,7 @@ declare Material: {
     unlit: (color: ColorLike) -> Material,
     texture: (texture: Texture | string, tint: ColorLike?) -> Material,
     checker: (a: ColorLike, b: ColorLike, repeats: number?) -> Material,
+    pbr: (color: ColorLike?, metallic: number?, roughness: number?) -> Material,
 }
 
 declare Color: {
@@ -405,6 +430,32 @@ declare function sun(direction: vector, color: ColorLike?, intensity: number?): 
 declare function ambient(color: ColorLike): ()
 declare function background(color: ColorLike): ()
 declare function fog(color: ColorLike?, near: number?, far: number?): ()
+type SkySpec = { top: ColorLike?, bottom: ColorLike?, cubemap: (string | false)?, blend: number?, lighting: number? }
+declare function sky(spec: (SkySpec | boolean)?): ()
+
+type BloomSettings = { threshold: number?, knee: number?, strength: number?, radius: number? } | boolean
+type SsaoSettings = { radius: number?, samples: number?, strength: number?, bias: number? } | boolean
+type MotionBlurSettings = { strength: number?, samples: number? } | boolean
+type DofSettings = { focus: number?, aperture: number?, focal_range: number?, samples: number? } | boolean
+type ColorGradingSettings = {
+    exposure: number?, contrast: number?, saturation: number?, temperature: number?, tint: number?,
+    lift: (vector | { number })?, gamma: (vector | { number })?, gain: (vector | { number })?,
+} | boolean
+type ChromaticAberrationSettings = { amount: number?, radial: boolean? } | boolean
+type FilmGrainSettings = { strength: number?, size: number? } | boolean
+type VignetteSettings = { strength: number?, inner: number?, outer: number?, color: ColorLike? } | boolean
+
+type BloomSettings = { threshold: number?, knee: number?, strength: number?, radius: number? } | boolean
+type SsaoSettings = { radius: number?, samples: number?, strength: number?, bias: number? } | boolean
+type MotionBlurSettings = { strength: number?, samples: number? } | boolean
+type DofSettings = { focus: number?, aperture: number?, focal_range: number?, samples: number? } | boolean
+type ColorGradingSettings = {
+    exposure: number?, contrast: number?, saturation: number?, temperature: number?, tint: number?,
+    lift: (vector | { number })?, gamma: (vector | { number })?, gain: (vector | { number })?,
+} | boolean
+type ChromaticAberrationSettings = { amount: number?, radial: boolean? } | boolean
+type FilmGrainSettings = { strength: number?, size: number? } | boolean
+type VignetteSettings = { strength: number?, inner: number?, outer: number?, color: ColorLike? } | boolean
 
 declare graphics: {
     height: number?,
@@ -420,6 +471,17 @@ declare graphics: {
     shader: Shader?,
     -- Shader, list of Shaders / { shader = s, size = "screen" | "scene" }, or nil
     post: any,
+    -- built-in post effects: nil / false = off, true = defaults, table = settings
+    tonemap: "off" | "aces" | "reinhard" | "hejl",
+    fxaa: boolean,
+    bloom: BloomSettings?,
+    ssao: SsaoSettings?,
+    motion_blur: MotionBlurSettings?,
+    dof: DofSettings?,
+    color_grading: ColorGradingSettings?,
+    chromatic_aberration: ChromaticAberrationSettings?,
+    film_grain: FilmGrainSettings?,
+    vignette: VignetteSettings?,
 }
 
 -- ===================================================================== scheduler, events, tweens
@@ -484,6 +546,19 @@ declare draw: {
     filter: (mode: "nearest" | "linear") -> (),
     stats: () -> { [string]: number },
     spark_badge: (opts: { align: Align?, margin: number?, width: number?, alpha: number?, x: number?, y: number? }?) -> (boolean, boolean),
+}
+
+type WidgetId = string | number
+
+declare ui: {
+    button: (id: WidgetId, x: number, y: number, w: number, h: number, text: string) -> boolean,
+    slider: (id: WidgetId, x: number, y: number, w: number, h: number, value: number, min: number?, max: number?) -> number,
+    checkbox: (id: WidgetId, x: number, y: number, size: number, checked: boolean) -> boolean,
+    panel: (x: number, y: number, w: number, h: number, color: ColorLike?, border: ColorLike?) -> boolean,
+    label: (x: number, y: number, text: string, size: number?, color: ColorLike?) -> (),
+    image: (x: number, y: number, w: number, h: number, texture: Texture | string) -> (),
+    progress: (x: number, y: number, w: number, h: number, t: number, color: ColorLike?) -> (),
+    hovered: () -> boolean,
 }
 
 declare screen: {
@@ -553,6 +628,24 @@ declare window: {
     title: string?,
     width: number,
     height: number,
+}
+
+-- Spark's debug overlay merged with the standard Luau debug library.
+declare debug: {
+    enabled: boolean,
+    hotkey: boolean,
+    show_fps: boolean,
+    show_gpu: boolean,
+    show_scene: boolean,
+    show_physics: boolean,
+    fps: number, -- read-only
+    frame_time: number, -- read-only (ms)
+    toggle: () -> boolean,
+    avg_frame_ms: () -> number,
+    add_line: (text: string, color: ColorLike?) -> (),
+    clear_lines: () -> (),
+    traceback: (message: string?, level: number?) -> string,
+    info: (...any) -> ...any,
 }
 
 declare function quit(): ()

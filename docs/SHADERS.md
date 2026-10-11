@@ -1,7 +1,8 @@
 # Spark Engine - shaders
 
-Spark ships no looks, presets or effects. Out of the box you get one plain lit shader (sun + ambient + up to 32
-point / spot lights + fog). Everything else - toon, PS1, pixel art, VHS, outlines, CRT - is a small WGSL file in your game.
+Out of the box you get one plain lit shader (sun + ambient + up to 32 point / spot lights + fog) and a set of built-in
+post effects that are off by default (`graphics.bloom`, `graphics.tonemap`, ... - see LUAU_API.md). Everything else -
+toon, PS1, pixel art, VHS, outlines, CRT - is a small WGSL file in your game.
 
 You write **only your function**. The engine adds uniforms, bindings, entry points and helpers before compiling
 (the full prelude is in `crates/spark-core/src/shaders/`). Two kinds:
@@ -54,12 +55,19 @@ frame.sun_dir.xyz, frame.sun_color.rgb, frame.ambient.rgb   // linear
 frame.fog_color.rgb, frame.fog                              // fog: near, far, enabled
 frame.light_count.x, frame.lights[i]                        // Light { position(xyz, w=range), color(rgb, w=1 spot), direction(xyz, w=cos outer), params(x=cos inner) }
 frame.shadow_view_proj, frame.shadow                        // sun shadow map: world -> shadow clip; enabled, 1/size, normal offset, distance
+frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
+frame.sky_top.rgb, frame.sky_bottom.rgb, frame.sky          // sky gradient (linear); enabled, cubemap blend, lighting, cubemap mips
+frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
 params                                                      // your struct Params
 texture1, texture2, linear_sampler, nearest_sampler
 linear_to_srgb(rgb), srgb_to_linear(rgb)
 ```
 
-All colors are linear; the engine converts to the screen at the end.
+All colors are linear; the engine converts to the screen at the end. The scene and intermediate post images are
+16-bit float where the GPU supports it, so `input_color` can return values above 1 (bright lights); they are clipped
+when written to the screen unless a tonemapper runs. The scene and intermediate post images are
+16-bit float where the GPU supports it, so `input_color` can return values above 1 (bright lights); they are clipped
+when written to the screen unless a tonemapper runs.
 
 ## Surface shaders
 
@@ -73,8 +81,10 @@ struct Fragment {
     custom: vec4<f32>,     // free: pass anything from vertex to fragment
     spark_instance: u32,   // engine-managed (instanced drawing): leave it alone
 }
-object.model, object.normal_matrix, object.color (linear), object.data, object.info (tiling x, tiling y, unlit 0/1)
+object.model, object.normal_matrix, object.color (linear), object.data, object.info (tiling x, tiling y, unlit 0/1, pbr 0/1)
+object.pbr (metallic, roughness, has normal map 0/1, -), object.emissive (linear rgb)
 base_texture, base_sampler                 // material texture (white if none), sampled with graphics.filter
+normal_texture                             // material normal map (flat if none), sampled with base_sampler
 // `object` is the object being drawn. Objects with the same mesh / material state are drawn in one
 // instanced draw call; that is invisible to shaders (always use `default_vertex` or start from
 // `var f: Fragment;` / `var f = default_vertex(v);` and return `f`, the engine fills spark_instance).
@@ -85,8 +95,13 @@ base_texture, base_sampler                 // material texture (white if none), 
 default_vertex(v) -> Fragment
 surface_color(uv) -> vec4<f32>             // object.color * base texture
 lighting(world_pos, normal) -> vec3<f32>   // ambient + sun (with shadows) + lights
+surface_normal(world_pos, normal, uv) -> vec3<f32>  // normal with the material normal map applied (normalized)
+pbr_lighting(world_pos, normal, base_rgb, metallic, roughness) -> vec3<f32>  // PBR version of base * lighting()
 sun_shadow(world_pos, normal) -> f32       // 1 = lit, 0 = in the sun's shadow (PCF); 1 when shadows are off
 apply_fog(rgb, world_pos) -> vec3<f32>
+sky_color(dir, blur) -> vec3<f32>          // sky in a world direction (blur 0 = sharp .. 1 = blurriest mip); black without a sky
+ambient_light(normal) -> vec3<f32>         // indirect light: the sky with sky lighting on, else frame.ambient
+ambient_reflection(dir, roughness) -> vec3<f32>  // environment reflection along `dir` (PBR specular ambient)
 default_fragment(f) -> vec4<f32>
 ```
 
@@ -119,7 +134,7 @@ fn vertex(v: VertexInput) -> Fragment {
 
 ## Post shaders
 
-Run full-screen, one after another; each pass reads the previous image.
+Run full-screen, one after another; each pass reads the previous image. Enabled built-in effects run first. Enabled built-in effects run first.
 
 ```wgsl
 struct PostInput { position: vec4<f32>, uv: vec2<f32> }   // uv 0..1, top-left = (0, 0)
@@ -155,5 +170,9 @@ let s = world.assets.add_shader("gray", GRAY_WGSL)?;          // or world.assets
 world.assets.shader_mut(s).unwrap().set_param("amount", &[0.8])?;
 world.render.height = Some(240);
 world.render.post = vec![PostPass { shader: s, size: PassSize::Screen }];
+world.render.postfx.bloom = Some(spark_core::render::Bloom { strength: 0.6, ..Default::default() });   // built-in effects
+world.render.postfx.tonemap = spark_core::render::Tonemap::Aces;
+world.render.postfx.bloom = Some(spark_core::render::Bloom { strength: 0.6, ..Default::default() });   // built-in effects
+world.render.postfx.tonemap = spark_core::render::Tonemap::Aces;
 let mat = Material::color(Color::RED).with_shader(Some(toon)).with_data([1.0, 0.0, 0.0, 0.0]);
 ```

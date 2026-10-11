@@ -88,6 +88,9 @@ pub const MAX_PARAMS_SIZE: usize = 256;
 const COMMON: &str = include_str!("shaders/common.wgsl");
 const SURFACE: &str = include_str!("shaders/surface.wgsl");
 const POST: &str = include_str!("shaders/post.wgsl");
+/// Sky bindings and helpers (`sky_color`, `ambient_light`): surface shaders and the skybox pass.
+const SKY: &str = include_str!("shaders/sky.wgsl");
+const SKYBOX: &str = include_str!("shaders/skybox.wgsl");
 
 /// A compiled (validated) shader plus its parameter values.
 #[derive(Clone, Debug)]
@@ -186,6 +189,12 @@ fn defines_struct(code: &str, name: &str) -> bool {
         || code.contains(&format!("struct {name}{{"))
 }
 
+/// Full WGSL of the skybox pass (`sky_vs` / `sky_fs`). It shares `sky_color` with surface
+/// shaders, so the sky behind objects matches their reflections.
+pub fn skybox_source() -> String {
+    format!("{COMMON}{SKY}{SKYBOX}")
+}
+
 /// Game code + engine prelude for `kind`.
 pub fn compose(code: &str, kind: ShaderKind) -> String {
     let mut s = String::with_capacity(code.len() + 8192);
@@ -198,10 +207,9 @@ pub fn compose(code: &str, kind: ShaderKind) -> String {
         ShaderKind::Surface => {
             let vs = if defines_fn(code, "vertex") { "vertex" } else { "default_vertex" };
             let fs = if defines_fn(code, "fragment") { "fragment" } else { "default_fragment" };
+            s.push_str(SKY);
             let mut surface = SURFACE.replace("SPARK_VERTEX", vs).replace("SPARK_FRAGMENT", fs);
             if vs == "vertex" {
-                // A custom vertex shader may move vertices on screen (snapping, wobble): the pipeline's
-                // `spark_fs` writes the depth of the unmoved surface (no z-fighting, see spark_plane_depth).
                 surface = surface.replace("fn spark_fs(", "fn spark_fs_raster(").replace("fn spark_fs_stable(", "fn spark_fs(");
             }
             s.push_str(&surface);
@@ -358,6 +366,75 @@ fn params_layout(module: &naga::Module) -> Result<(Vec<Param>, usize), String> {
 /// Built-in passthrough post shader (used when the game sets no post passes).
 pub const COPY_POST: &str = "fn post(p: PostInput) -> vec4<f32> { return input_color(p.uv); }\n";
 
+// ── Built-in post-processing effect shaders ───────────────────────────────────
+// Each is plain WGSL code (user part only); the engine appends the prelude via `compose`.
+
+/// ACES / Reinhard / Hejl filmic tonemapping.
+pub const TONEMAP_POST: &str = include_str!("shaders/postfx/tonemap.wgsl");
+/// Single-pass bloom (bright pass + 13-tap blur).
+pub const BLOOM_POST: &str = include_str!("shaders/postfx/bloom.wgsl");
+/// Screen-space ambient occlusion.
+pub const SSAO_POST: &str = include_str!("shaders/postfx/ssao.wgsl");
+/// Camera motion blur (reprojection with the previous frame camera).
+pub const MOTION_BLUR_POST: &str = include_str!("shaders/postfx/motion_blur.wgsl");
+/// Depth of field (bokeh blur).
+pub const DOF_POST: &str = include_str!("shaders/postfx/dof.wgsl");
+/// Color grading (exposure, contrast, saturation, temperature, lift/gamma/gain).
+pub const COLOR_GRADE_POST: &str = include_str!("shaders/postfx/color_grade.wgsl");
+/// FXAA antialiasing (Lottes console variant).
+pub const FXAA_POST: &str = include_str!("shaders/postfx/fxaa.wgsl");
+/// Chromatic aberration (RGB channel offset).
+pub const CHROMATIC_ABERRATION_POST: &str = include_str!("shaders/postfx/chromatic_aberration.wgsl");
+/// Film grain (procedural noise).
+pub const FILM_GRAIN_POST: &str = include_str!("shaders/postfx/film_grain.wgsl");
+/// Vignette (corner darkening).
+pub const VIGNETTE_POST: &str = include_str!("shaders/postfx/vignette.wgsl");
+
+/// All built-in post effect shader sources, indexed by [`PostFxKind`].
+pub const ALL_POSTFX: [(&str, &str); 10] = [
+    ("spark tonemap", TONEMAP_POST),
+    ("spark bloom", BLOOM_POST),
+    ("spark ssao", SSAO_POST),
+    ("spark motion blur", MOTION_BLUR_POST),
+    ("spark dof", DOF_POST),
+    ("spark color grade", COLOR_GRADE_POST),
+    ("spark fxaa", FXAA_POST),
+    ("spark chromatic aberration", CHROMATIC_ABERRATION_POST),
+    ("spark film grain", FILM_GRAIN_POST),
+    ("spark vignette", VIGNETTE_POST),
+];
+
+/// Identifies a built-in post-processing effect.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum PostFxKind {
+    Tonemap = 0,
+    Bloom = 1,
+    Ssao = 2,
+    MotionBlur = 3,
+    Dof = 4,
+    ColorGrade = 5,
+    Fxaa = 6,
+    ChromaticAberration = 7,
+    FilmGrain = 8,
+    Vignette = 9,
+}
+
+impl PostFxKind {
+    pub const COUNT: usize = 10;
+    pub const ALL: [Self; 10] = [
+        Self::Tonemap, Self::Bloom, Self::Ssao, Self::MotionBlur, Self::Dof,
+        Self::ColorGrade, Self::Fxaa, Self::ChromaticAberration, Self::FilmGrain, Self::Vignette,
+    ];
+
+    pub fn shader_source(self) -> &'static str {
+        ALL_POSTFX[self as usize].1
+    }
+
+    pub fn name(self) -> &'static str {
+        ALL_POSTFX[self as usize].0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +496,34 @@ mod tests {
         assert!(!defines_fn("fn vertex2(v: VertexInput)", "vertex"));
         assert!(defines_struct("struct Params {", "Params"));
         assert!(!defines_struct("struct MyParams {", "Params"));
+    }
+}
+
+#[cfg(test)]
+mod postfx_tests {
+    use super::*;
+
+    /// Every built-in effect passes naga validation (the renderer would panic on start otherwise).
+    #[test]
+    fn builtin_post_effects_compile() {
+        let mut errors = Vec::new();
+        for kind in PostFxKind::ALL {
+            match ShaderData::compile(kind.name(), kind.shader_source()) {
+                Ok(d) => assert_eq!(d.kind, ShaderKind::Post, "{}", kind.name()),
+                Err(e) => errors.push(format!("{}:\n{e}", kind.name())),
+            }
+        }
+        assert!(errors.is_empty(), "{}", errors.join("\n\n"));
+    }
+
+    #[test]
+    fn skybox_shader_is_valid() {
+        let source = skybox_source();
+        let module = naga::front::wgsl::parse_str(&source).map_err(|e| e.emit_to_string(&source)).unwrap();
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
+            .validate(&module)
+            .map_err(|e| e.emit_to_string(&source))
+            .unwrap();
+        assert!(module.entry_points.iter().any(|e| e.name == "sky_vs") && module.entry_points.iter().any(|e| e.name == "sky_fs"));
     }
 }

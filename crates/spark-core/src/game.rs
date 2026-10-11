@@ -52,10 +52,12 @@ pub fn run_frame<G: Game + ?Sized>(game: &mut G, world: &mut World, real_dt: f32
         world.input.end_fixed_steps();
     }
     let dt = world.time.dt;
+    world.ui.begin(&world.canvas, &world.input);
     game.update(world, dt);
     crate::animation::update(world, dt);
     game.late_update(world, dt);
     game.draw(world);
+    world.ui.end();
     world.input.end_frame();
     crate::audio::flush(world);
 }

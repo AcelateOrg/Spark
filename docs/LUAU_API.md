@@ -281,6 +281,12 @@ Primitives are centered at the origin (a cube of size 1 spans -0.5..0.5). Same p
 | `mat:with_blend("alpha")` | `"auto"` (default: alpha when color alpha < 1), `"opaque"`, `"alpha"` (glass, water, fades), `"additive"` (fire, glow) |
 | `mat:with_double_sided(true)`, `mat:with_cast_shadow(false)` | draw back faces (leaves, flags); no sun shadow |
 | `mat.blend`, `mat.double_sided`, `mat.cast_shadow` | read; objects also have `obj.blend`, `obj.double_sided`, `obj.cast_shadow` (read/write, also `spawn` props) |
+| `Material.pbr(c="white", metallic=0, roughness=0.5)` | physically based (Cook-Torrance GGX): metals reflect the ambient light and have tinted highlights |
+| `mat:with_metallic(m)`, `mat:with_roughness(r)` | 0..1 (clamped); either one turns PBR shading on |
+| `mat:with_emissive(c)` | light the surface gives off by itself (screens, lava, lamps); works in every mode, pairs well with bloom |
+| `mat:with_normal_map(tex_or_path)` | tangent-space normal map (OpenGL convention, green = up); `nil` removes it; works with and without PBR |
+| `mat.pbr`, `mat.metallic`, `mat.roughness`, `mat.emissive`, `mat.normal_map` | read; objects have the same names (read/write, also `spawn` props); setting `obj.metallic` / `obj.roughness` turns PBR on |
+| `obj.lod = { {20, mid}, {60, low} }` | level of detail: from 20 m away draw `mid`, from 60 m `low` (also a `spawn` prop; `{}` = off) |
 | `Color.rgb(r,g,b)`, `Color.rgba(r,g,b,a)`, `Color.hex("#ff8800")`, `Color.lerp(a,b,t)` | |
 | `Color.RED`, `Color.SKY`, ... | uppercase names of the color list above |
 | `color.r .g .b .a`, `color:lerp(c, t)`, `color:with_alpha(a)` | |
@@ -329,9 +335,10 @@ spawn(Mesh.box(0.1, 0.1, 0.6), "gray", { parent = hero:find("hand.R") })   -- sw
 
 - Formats: `.glb` (recommended) and `.gltf` (+ .bin / images next to it). Export from Blender: File > Export > glTF 2.0,
   "+Y up", forward = -Z for Spark (models face -Z like every Spark object; `obj:look_at` turns -Z to the target).
-- Supported: meshes (triangles), node hierarchy, base color factor + base color texture, `KHR_materials_unlit`,
+- Supported: meshes (triangles), node hierarchy, base color factor + base color texture, normal map, emissive
+  factor, metallic / roughness factors (used once you set `pbr = true` on its objects), `KHR_materials_unlit`,
   skins (up to 4 bones per vertex, CPU skinning), animations of translation / rotation / scale (step, linear, cubic).
-  Not (yet): morph targets, PBR maps (normal / metal-rough are ignored), cameras / lights in the file.
+  Not (yet): morph targets, metal-rough / emissive / occlusion textures, cameras / lights in the file.
 - `Model.load(path)` -> Model (cached by path). `model.name`, `model.animations` (list of clip names), `model.size`
   (bind-pose size vector), `model:duration(name)`.
 - `spawn(model_or_path, material?, props?)` -> root Object (empty, named after the file); every glTF node becomes a
@@ -374,6 +381,12 @@ t:cancel()
 - Default camera: position (0, 3, 8) looking at the origin.
 - `sun(direction, color?, intensity?)` - direction the light travels, e.g. `vec3(-0.5, -1, -0.3)`
 - `ambient(color)`, `background(color)`, `fog(color, near=10, far=60)`, `fog(nil)` to disable
+- `sky({ top = "sky", bottom = "#40382f", cubemap = "sky.png", blend = 1, lighting = 0 })` - sky behind everything
+  instead of the flat background; every key is optional, `sky(true)` = default blue sky, `sky(nil)` to remove.
+  `top` / `bottom` = gradient colors straight up / down; `cubemap` = image path of a 6:1 horizontal strip of square
+  faces in +X, -X, +Y, -Y, +Z, -Z order (cached by path), drawn over the gradient with `blend` (0..1);
+  `lighting` = image-based lighting strength: 0 keeps `ambient()`, above 0 the sky lights objects from every
+  direction (blue from above, ground color from below) and PBR metals reflect it (rougher = blurrier)
 - Point / spot lights (up to 32 nearest visible lights per frame; any object can carry one):
   - `light({ type = "point", color = "#ffd9a0", intensity = 1.5, range = 8, position = vec3(0, 3, 0) })` -> Object (invisible, only light)
   - `light({ type = "spot", angle = 30, softness = 0.3, ... })` - cone along the object's forward (-Z); aim with `rotation` or `obj:look_at(...)`
@@ -383,8 +396,8 @@ t:cancel()
 
 ## Render settings and shaders
 
-Spark has no built-in looks or effects: the default is plain lit rendering, everything else is your own WGSL.
-Full shader reference with examples: [SHADERS.md](SHADERS.md).
+The default is plain lit rendering. Built-in post effects (below) are all off by default; anything else is your own
+WGSL. Full shader reference with examples: [SHADERS.md](SHADERS.md).
 
 ```lua
 graphics.height = 240                -- render the 3D scene 240 px tall (width keeps the aspect), nil = native
@@ -417,6 +430,70 @@ graphics.post = { vhs }                            -- chain of full-screen passe
 - `shader.name`, `shader.kind` (`"surface"` | `"post"`), `shader.params` -> list of param names
 - Per material / object: `mat:with_shader(s)`, `mat:with_data(a, b, c, d)`; `obj.shader`, `obj.data` (read/write);
   spawn props `shader = s`, `data = {a, b, c, d}`. `data` arrives in WGSL as `object.data` (per-object values, e.g. a hit flash).
+
+### Built-in post effects
+
+Each effect is `nil` / `false` (off, default), `true` (default settings) or a table: missing keys keep their defaults,
+unknown keys and wrong types are errors. Reading an effect gives its current settings table (or `nil`).
+They run before your `graphics.post` passes, in this fixed order:
+SSAO -> motion blur -> depth of field -> bloom -> color grading -> tonemap -> FXAA -> chromatic aberration -> film grain -> vignette.
+
+```lua
+graphics.tonemap = "aces"                          -- "off" (default) | "aces" | "reinhard" | "hejl"
+graphics.bloom = { strength = 0.6 }                -- glow around bright pixels
+graphics.vignette = true                           -- defaults
+graphics.color_grading = { saturation = 1.2, gain = vec3(1, 0.95, 0.9) }
+graphics.fxaa = true
+graphics.bloom = nil                               -- off again
+```
+
+| effect | settings (defaults) |
+|---|---|
+| `tonemap` | `"off"` / `"aces"` / `"reinhard"` / `"hejl"` - maps bright (HDR) colors into the screen range |
+| `bloom` | `threshold` 0.8 (brightness where glow starts), `knee` 0.2, `strength` 0.4, `radius` 8 (pixels) |
+| `ssao` | `radius` 0.5 (meters), `samples` 16 (1-64), `strength` 1, `bias` 0.05 (meters) |
+| `motion_blur` | `strength` 1 (fraction of the frame the shutter is open), `samples` 8 (1-32); camera motion only |
+| `dof` | `focus` 10 (meters), `aperture` 2, `focal_range` 3 (meters in focus around `focus`), `samples` 16 |
+| `color_grading` | `exposure` 1, `contrast` 1, `saturation` 1, `temperature` 0 (-1 warm .. 1 cool), `tint` 0 (-1 green .. 1 magenta), `lift` vec3(0) / `gamma` vec3(1) / `gain` vec3(1) (per channel, vec3 or `{r, g, b}`) |
+| `fxaa` | `true` / `false` - smooths edges MSAA misses (shader / alpha edges) |
+| `chromatic_aberration` | `amount` 2 (pixels at the screen edge), `radial` true (false = horizontal split) |
+| `film_grain` | `strength` 0.05, `size` 2 (pixels) |
+| `vignette` | `strength` 0.5, `inner` 0.3, `outer` 0.85 (0 = center, 1 = screen edge), `color` black |
+
+The 3D scene is rendered in HDR (16-bit float) where the GPU supports it, so lights brighter than 1 survive until
+`tonemap` / `bloom`. With `tonemap = "off"` such values are clipped, as before.
+
+### Built-in post effects
+
+Each effect is `nil` / `false` (off, default), `true` (default settings) or a table: missing keys keep their defaults,
+unknown keys and wrong types are errors. Reading an effect gives its current settings table (or `nil`).
+They run before your `graphics.post` passes, in this fixed order:
+SSAO -> motion blur -> depth of field -> bloom -> color grading -> tonemap -> FXAA -> chromatic aberration -> film grain -> vignette.
+
+```lua
+graphics.tonemap = "aces"                          -- "off" (default) | "aces" | "reinhard" | "hejl"
+graphics.bloom = { strength = 0.6 }                -- glow around bright pixels
+graphics.vignette = true                           -- defaults
+graphics.color_grading = { saturation = 1.2, gain = vec3(1, 0.95, 0.9) }
+graphics.fxaa = true
+graphics.bloom = nil                               -- off again
+```
+
+| effect | settings (defaults) |
+|---|---|
+| `tonemap` | `"off"` / `"aces"` / `"reinhard"` / `"hejl"` - maps bright (HDR) colors into the screen range |
+| `bloom` | `threshold` 0.8 (brightness where glow starts), `knee` 0.2, `strength` 0.4, `radius` 8 (pixels) |
+| `ssao` | `radius` 0.5 (meters), `samples` 16 (1-64), `strength` 1, `bias` 0.05 (meters) |
+| `motion_blur` | `strength` 1 (fraction of the frame the shutter is open), `samples` 8 (1-32); camera motion only |
+| `dof` | `focus` 10 (meters), `aperture` 2, `focal_range` 3 (meters in focus around `focus`), `samples` 16 |
+| `color_grading` | `exposure` 1, `contrast` 1, `saturation` 1, `temperature` 0 (-1 warm .. 1 cool), `tint` 0 (-1 green .. 1 magenta), `lift` vec3(0) / `gamma` vec3(1) / `gain` vec3(1) (per channel, vec3 or `{r, g, b}`) |
+| `fxaa` | `true` / `false` - smooths edges MSAA misses (shader / alpha edges) |
+| `chromatic_aberration` | `amount` 2 (pixels at the screen edge), `radial` true (false = horizontal split) |
+| `film_grain` | `strength` 0.05, `size` 2 (pixels) |
+| `vignette` | `strength` 0.5, `inner` 0.3, `outer` 0.85 (0 = center, 1 = screen edge), `color` black |
+
+The 3D scene is rendered in HDR (16-bit float) where the GPU supports it, so lights brighter than 1 survive until
+`tonemap` / `bloom`. With `tonemap = "off"` such values are clipped, as before.
 
 ## Physics
 
@@ -519,6 +596,38 @@ end
 
 Full 2D game: `examples/starfall/main.luau`.
 
+## UI widgets (ui)
+
+Immediate-mode widgets on the UI layer, in the same virtual pixels as `draw` (top-left origin). Call them every
+frame from `render()` (or `update()`); they draw themselves and return the result right away. Interactive widgets take
+an **id** first: any string or integer that stays the same every frame (a click is a press and a release in
+different frames).
+
+```lua
+local volume, music = 0.5, true
+function render()
+    ui.panel(10, 10, 240, 150)
+    if ui.button("play", 20, 20, 220, 36, "Play") then start_game() end
+    volume = ui.slider("volume", 20, 70, 220, 16, volume, 0, 1)
+    music = ui.checkbox("music", 20, 100, 20, music)
+    ui.label(50, 102, "Music")
+    ui.progress(20, 135, 220, 10, hp / max_hp, "#e04040")
+end
+function update(dt)
+    if input.mouse_pressed("left") and not ui.hovered() then shoot() end   -- clicks on the UI don't shoot
+end
+```
+
+- `ui.button(id, x, y, w, h, text)` -> true on the frame it is clicked (pressed and released over it)
+- `ui.slider(id, x, y, w, h, value, min = 0, max = 1)` -> the value (changed while dragged)
+- `ui.checkbox(id, x, y, size, checked)` -> the state (flipped when clicked)
+- `ui.panel(x, y, w, h, color?, border_color?)` -> true when the mouse is over it
+- `ui.label(x, y, text, size = 16, color = white)` - text, top-left at x, y
+- `ui.image(x, y, w, h, texture)` - Texture or image path, stretched over the rect
+- `ui.progress(x, y, w, h, t, color?)` - bar filled to t (0..1)
+- `ui.hovered()` -> true when the mouse is over UI drawn this or the previous frame
+- Widgets never change `draw.layer` or the draw transform. Only the left mouse button interacts.
+
 ## Input and time
 
 - `input.down(key)`, `input.pressed(key)` (this frame), `input.released(key)`
@@ -608,6 +717,20 @@ save.set("settings", { volume = 0.8, fov = 75 })
 ## Window
 
 - `window.fullscreen` (read/write, borderless), `window.title` (read/write; nil = game title), `window.width`, `window.height` (pixels, read-only)
+
+## Debug overlay
+
+F1 shows an overlay with FPS, frame time (min / max / average over 120 frames), GPU name, object count,
+draw calls and triangles of the last frame. The same `debug` table still holds the standard Luau
+library (`debug.traceback()`, `debug.info(...)`).
+
+- `debug.enabled` (read/write), `debug.toggle()` -> new state
+- `debug.hotkey = false`: F1 no longer toggles the overlay (games that use F1 themselves)
+- `debug.show_fps`, `debug.show_gpu`, `debug.show_scene`, `debug.show_physics` (read/write sections)
+- `debug.fps`, `debug.frame_time` (ms, read-only), `debug.avg_frame_ms()`
+- `debug.add_line(text, color="white")`: extra line for this frame only (call it every frame); `debug.clear_lines()`
+
+Unknown fields and writes to read-only ones are errors.
 
 ## Misc
 

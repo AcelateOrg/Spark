@@ -34,7 +34,7 @@ Spark Engine flags:
   --fullscreen          start in borderless fullscreen
   --windowed            start in a window even if the game asks for fullscreen
   --help                this text
-In a window: F11 or Alt+Enter toggles fullscreen, F12 saves a screenshot to ./screenshots/
+In a window: F1 toggles the debug overlay, F11 or Alt+Enter toggles fullscreen, F12 saves a screenshot to ./screenshots/
 Env: RUST_LOG=debug for more logs, WGPU_BACKEND=dx12|vulkan|gl to force a GPU API.";
 
 /// Parsed command-line flags.
@@ -396,6 +396,53 @@ fn numbered(path: &std::path::Path, frame: u64) -> PathBuf {
     path.with_file_name(format!("{stem}-{frame:05}.png"))
 }
 
+/// Draws the debug overlay (FPS, GPU, scene stats, custom lines) on the canvas when it is on.
+/// Called after `game.draw()` so the overlay sits on top of everything. `stats` are the numbers
+/// of the previous rendered frame. Custom lines are cleared every frame, also while hidden.
+fn draw_debug_overlay(world: &mut World, gpu_name: &str, stats: spark_render::FrameStats) {
+    if !world.debug.enabled() {
+        world.debug.clear_lines();
+        return;
+    }
+    let object_count = world.scene.len();
+    let physics_active = world.scene.iter().filter(|(_, o)| o.body.is_some()).count();
+    let lines = world.debug.build_lines(gpu_name, object_count, stats.draw_calls, stats.triangles, physics_active);
+
+    {
+        let c = &mut world.canvas;
+        let prev = c.layer();
+        c.set_layer(spark_core::Layer::Ui);
+        let size = c.size();
+        let pad = (size.y * 0.02).max(10.0);
+        let text_size = 15.0;
+        let line_height = text_size * 1.2;
+
+        // Semi-transparent background for readability.
+        let bg_height = pad + lines.len() as f32 * line_height + pad * 0.5;
+        c.rect(
+            spark_core::Vec2::ZERO,
+            spark_core::Vec2::new(size.x, bg_height),
+            spark_core::Color::rgba(0.0, 0.0, 0.0, 0.6),
+            spark_core::Align::TOP_LEFT,
+        );
+
+        for (i, line) in lines.iter().enumerate() {
+            let y = pad + i as f32 * line_height;
+            let params = spark_core::TextParams {
+                size: text_size,
+                color: line.color,
+                align: spark_core::Align { x: 0.0, y: 0.0 },
+                ..Default::default()
+            };
+            c.text(&line.text, spark_core::Vec2::new(pad, y), &params);
+        }
+
+        c.set_layer(prev);
+    }
+
+    world.debug.clear_lines();
+}
+
 fn run_headless<G: Game>(app: App, mut game: G) -> Result<(), String> {
     let (w, h) = output_size(&app);
     let mut renderer = Renderer::new_headless(w, h)?;
@@ -435,6 +482,9 @@ fn run_headless<G: Game>(app: App, mut game: G) -> Result<(), String> {
             game.start(&mut world);
         }
         run_frame(&mut game, &mut world, dt);
+        world.debug.record_frame(dt);
+        let gpu_name = renderer.info().name.clone();
+        draw_debug_overlay(&mut world, &gpu_name, renderer.last_stats());
         if let Some(n) = app.args.screenshot_every {
             if world.time.frame % n == 0 {
                 let path = numbered(&shots_base, world.time.frame);
@@ -527,6 +577,7 @@ impl<G: Game> Runner<G> {
         let dt = self.app.args.fixed_dt.unwrap_or((now - self.last).as_secs_f32().min(0.1));
         self.last = now;
         self.gamepads.poll(&mut self.world.input);
+        self.world.debug.record_frame(dt);
         run_frame(&mut self.game, &mut self.world, dt);
         if self.world.quit_requested() {
             event_loop.exit();
@@ -593,6 +644,7 @@ impl<G: Game> Runner<G> {
         self.last = now;
         let dt = self.app.args.fixed_dt.unwrap_or(real_dt.min(0.1));
         self.gamepads.poll(&mut self.world.input);
+        self.world.debug.record_frame(real_dt);
 
         if let Some(r) = &self.renderer {
             let (w, h) = r.size();
@@ -609,12 +661,24 @@ impl<G: Game> Runner<G> {
         } else {
             run_frame(&mut self.game, &mut self.world, dt);
         }
+        // Draw debug overlay on the canvas before rendering (on top of game content).
+        let (gpu_name, stats) =
+            self.renderer.as_ref().map(|r| (r.info().name.clone(), r.last_stats())).unwrap_or_default();
+        draw_debug_overlay(&mut self.world, &gpu_name, stats);
         self.apply_cursor_lock();
         self.apply_branding();
         self.apply_window();
         let Some(renderer) = self.renderer.as_mut() else { return };
         let capture = std::mem::take(&mut self.screenshot_requested);
         match renderer.render_and_capture_if(&self.world, capture) {
+            // Driver reset / GPU removed: rebuild the device once instead of closing the game.
+            Err(e) if renderer.is_device_lost() => match renderer.recover() {
+                Ok(()) => log::warn!("{e}: GPU device recreated"),
+                Err(r) => {
+                    self.fail(event_loop, format!("{e}; recovery failed: {r}"));
+                    return;
+                }
+            },
             Err(e) => {
                 self.fail(event_loop, e);
                 return;
@@ -701,6 +765,19 @@ impl<G: Game> ApplicationHandler for Runner<G> {
         if let WindowEvent::KeyboardInput { event: key, .. } = &event {
             if key.state.is_pressed() && !key.repeat && key.physical_key == PhysicalKey::Code(KeyCode::F12) {
                 self.screenshot_requested = true;
+            }
+            if self.world.debug.hotkey
+                && key.state.is_pressed()
+                && !key.repeat
+                && key.physical_key == PhysicalKey::Code(KeyCode::F1)
+            {
+                self.world.debug.toggle();
+                if self.world.debug.enabled() {
+                    self.world.debug.reset_min_max();
+                    log::info!("debug overlay: on");
+                } else {
+                    log::info!("debug overlay: off");
+                }
             }
             let alt = self.world.input.down(spark_core::Key::LAlt) || self.world.input.down(spark_core::Key::RAlt);
             let toggle = key.physical_key == PhysicalKey::Code(KeyCode::F11)

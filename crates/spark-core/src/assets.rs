@@ -14,6 +14,13 @@ pub struct MeshId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TextureId(pub u32);
 
+/// Handle to a cubemap (six square faces) stored in [`Assets`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CubemapId(pub u32);
+
+/// Cube faces in GPU layer order.
+pub const CUBE_FACES: [&str; 6] = ["+X", "-X", "+Y", "-Y", "+Z", "-Z"];
+
 /// RGBA8 image in sRGB space.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageData {
@@ -87,6 +94,8 @@ pub struct Assets {
     model_paths: HashMap<PathBuf, ModelId>,
     textures: Vec<ImageData>,
     texture_paths: HashMap<PathBuf, TextureId>,
+    cubemaps: Vec<[ImageData; 6]>,
+    cubemap_paths: HashMap<PathBuf, CubemapId>,
     shaders: Vec<ShaderData>,
     shader_paths: HashMap<PathBuf, ShaderId>,
     generation: u64,
@@ -180,6 +189,43 @@ impl Assets {
         self.textures.len()
     }
 
+    /// Adds a cubemap from six square faces of the same size, in [`CUBE_FACES`] order
+    /// (+X, -X, +Y, -Y, +Z, -Z; +Y is up, -Z is forward like the Spark camera).
+    pub fn add_cubemap(&mut self, faces: [ImageData; 6]) -> Result<CubemapId, String> {
+        let size = faces[0].width;
+        if size == 0 {
+            return Err("cubemap faces are empty".into());
+        }
+        for (f, name) in faces.iter().zip(CUBE_FACES) {
+            if f.width != size || f.height != size {
+                return Err(format!("cubemap face {name} is {}x{}; all faces must be {size}x{size}", f.width, f.height));
+            }
+        }
+        self.cubemaps.push(faces);
+        Ok(CubemapId(self.cubemaps.len() as u32 - 1))
+    }
+
+    /// Loads a cubemap once from a horizontal strip image (6 square faces side by side, in
+    /// +X, -X, +Y, -Y, +Z, -Z order, so the image is 6 times wider than tall).
+    pub fn load_cubemap(&mut self, path: &str) -> Result<CubemapId, String> {
+        let full = self.resolve(path);
+        if let Some(&id) = self.cubemap_paths.get(&full) {
+            return Ok(id);
+        }
+        let strip = ImageData::load(&full)?;
+        let id = self.add_cubemap(split_strip(&strip).map_err(|e| format!("{path}: {e}"))?)?;
+        self.cubemap_paths.insert(full, id);
+        Ok(id)
+    }
+
+    pub fn cubemap(&self, id: CubemapId) -> Option<&[ImageData; 6]> {
+        self.cubemaps.get(id.0 as usize)
+    }
+
+    pub fn cubemap_count(&self) -> usize {
+        self.cubemaps.len()
+    }
+
     /// Compiles WGSL code (see [`crate::shader`]).
     pub fn add_shader(&mut self, name: &str, code: &str) -> Result<ShaderId, String> {
         self.shaders.push(ShaderData::compile(name, code)?);
@@ -229,6 +275,8 @@ impl Assets {
         self.model_paths.clear();
         self.textures.clear();
         self.texture_paths.clear();
+        self.cubemaps.clear();
+        self.cubemap_paths.clear();
         self.shaders.clear();
         self.shader_paths.clear();
         self.generation += 1;
@@ -237,5 +285,63 @@ impl Assets {
     /// Changes every time [`Assets::clear`] is called (renderer uses it to drop GPU copies).
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+}
+/// Cuts a 6:1 horizontal strip into its six square faces.
+fn split_strip(strip: &ImageData) -> Result<[ImageData; 6], String> {
+    let size = strip.height;
+    if size == 0 || strip.width != size * 6 {
+        return Err(format!(
+            "a cubemap strip must be 6 square faces side by side (width = 6 x height), got {}x{}",
+            strip.width, strip.height
+        ));
+    }
+    Ok(std::array::from_fn(|face| {
+        let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+        for y in 0..size {
+            let start = ((y * strip.width + face as u32 * size) * 4) as usize;
+            pixels.extend_from_slice(&strip.pixels[start..start + (size * 4) as usize]);
+        }
+        ImageData::new(size, size, pixels)
+    }))
+}
+
+#[cfg(test)]
+mod cubemap_tests {
+    use super::*;
+
+    fn face(c: u8, size: u32) -> ImageData {
+        ImageData::new(size, size, [c, c, c, 255].repeat((size * size) as usize))
+    }
+
+    #[test]
+    fn strip_splits_into_faces_in_order() {
+        // 6 faces of 2x2, face i filled with value i * 10.
+        let (size, w) = (2u32, 12u32);
+        let mut pixels = Vec::new();
+        for _y in 0..size {
+            for x in 0..w {
+                let v = (x / size) as u8 * 10;
+                pixels.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let faces = split_strip(&ImageData::new(w, size, pixels)).unwrap();
+        for (i, f) in faces.iter().enumerate() {
+            assert_eq!(*f, face(i as u8 * 10, size), "face {}", CUBE_FACES[i]);
+        }
+        assert!(split_strip(&ImageData::new(4, 2, vec![0; 32])).is_err(), "not 6:1");
+    }
+
+    #[test]
+    fn cubemap_faces_must_match() {
+        let mut a = Assets::new();
+        let ok = a.add_cubemap(std::array::from_fn(|i| face(i as u8, 4))).unwrap();
+        assert_eq!(a.cubemap(ok).unwrap()[5], face(5, 4));
+        let mut bad: [ImageData; 6] = std::array::from_fn(|_| face(0, 4));
+        bad[3] = face(0, 2);
+        assert!(a.add_cubemap(bad).unwrap_err().contains("-Y"));
+        assert!(a.add_cubemap(std::array::from_fn(|_| face(0, 0))).is_err());
+        a.clear();
+        assert_eq!(a.cubemap_count(), 0);
     }
 }

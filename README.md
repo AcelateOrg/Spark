@@ -55,8 +55,8 @@ Spark does not try to compete with Unity, Unreal or Godot. It has a different jo
 
 | Module | What you get |
 |---|---|
-| **Render** | wgpu (Vulkan / DirectX 12 / Metal / OpenGL fallback). 3D meshes and primitives, glTF 2.0 models with skins and animations, sun / point / spot lights, fog, your own WGSL surface and full-screen post shaders with hot reload ([docs/SHADERS.md](docs/SHADERS.md)), low internal resolution for weak PCs |
-| **2D** | immediate-mode drawing: sprites and sprite sheets, text with any TTF/OTF font, shapes, transforms, UI and in-scene layers |
+| **Render** | wgpu (Vulkan / DirectX 12 / Metal / OpenGL fallback). 3D meshes and primitives, glTF 2.0 models with skins and animations, sun / point / spot lights, optional PBR materials (metallic / roughness, normal maps, emissive), mesh LOD, gradient or cubemap sky with image-based lighting, fog, HDR scene, built-in post effects (bloom, tonemapping, SSAO, depth of field, motion blur, color grading, FXAA, vignette, film grain, chromatic aberration; all off by default), your own WGSL surface and full-screen post shaders with hot reload ([docs/SHADERS.md](docs/SHADERS.md)), low internal resolution for weak PCs |
+| **2D** | immediate-mode drawing: sprites and sprite sheets, text with any TTF/OTF font, shapes, transforms, UI and in-scene layers, immediate-mode UI widgets (buttons, sliders, checkboxes, panels, progress bars) |
 | **Script** | Luau runtime with hot reload, modules (`require`), timers, coroutine tasks with `wait`, tweens |
 | **Input** | full keyboard (punctuation, numpad, F1-F24), text input with IME, key repeat, mouse with side buttons and FPS mouse lock, gamepads with hot-plug |
 | **Audio** | wav / ogg / mp3 / flac, 3D positional sound, fades, mixer buses (music / sfx / ui ...), layered music |
@@ -181,15 +181,15 @@ spark --version
 
 Flags for every game: `--headless`, `--frames N`, `--screenshot PATH`, `--dump-scene`, `--size WxH`, `--fixed-dt S`,
 `--no-vsync`, `--splash` / `--no-splash`, `--fullscreen`, `--windowed`, `--help`.
-In a window: F12 = screenshot, F11 / Alt+Enter = fullscreen. Environment: `RUST_LOG=debug`, `WGPU_BACKEND=dx12|vulkan|metal|gl`.
+In a window: F1 = debug overlay, F12 = screenshot, F11 / Alt+Enter = fullscreen. Environment: `RUST_LOG=debug`, `WGPU_BACKEND=dx12|vulkan|metal|gl`.
 
 ## Architecture
 
 | Crate | Role |
 |---|---|
 | `spark` | facade: `App`, prelude, re-exports - use this one from Rust |
-| `spark-core` | world data without GPU: scene, assets, materials, input, time, events, scheduler, audio queue, virtual file system |
-| `spark-render` | wgpu renderer: surface / post shaders, 2D canvas, windowed and headless, screenshots |
+| `spark-core` | world data without GPU: scene, assets, materials, sky, UI widget state, input, time, events, scheduler, audio queue, virtual file system, WGSL shader preludes |
+| `spark-render` | wgpu renderer: surface / post shaders, PBR, sky, built-in post effects, 2D canvas, windowed and headless, screenshots |
 | `spark-window` | winit window and input mapping, gamepads (gilrs) |
 | `spark-audio` | kira audio backend |
 | `spark-physics` | rapier3d backend |
@@ -202,17 +202,6 @@ Conventions: Y-up, right-handed, 1 unit = 1 meter, objects look along -Z, radian
 
 Early version (0.1). Windows 10/11 x64 is the main and most played platform; Linux (X11 / Wayland) and macOS
 are built and tested by CI on every commit (headless tests), but have seen less real play. The API can still change between versions - `spark docs` keeps a game's docs in sync.
-
-## Releases (maintainers)
-
-Every push and pull request runs the [CI workflow](.github/workflows/ci.yml) on Windows, Linux and macOS:
-clippy (`-D warnings`), release build, `cargo test`, and `spark new` + `spark check --json` on the template game.
-The binaries are uploaded as `spark-windows-x64`, `spark-linux-x64` and `spark-macos-arm64` artifacts.
-
-To release: bump `version` in the root `Cargo.toml`, push, then create a release on GitHub (Releases > Draft a new
-release, tag `v0.1.0`). The [release workflow](.github/workflows/release.yml) builds `spark-windows-x64.zip`,
-`spark-linux-x64.tar.gz` and `spark-macos-arm64.tar.gz` and attaches them to the release (a few minutes);
-`install.ps1`, `install.sh` and `spark update` download them from there (keep the asset names).
 
 ## License
 
