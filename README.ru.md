@@ -185,8 +185,8 @@ spark --version
 | Крейт | Роль |
 |---|---|
 | `spark` | фасад: `App`, prelude, реэкспорты — его подключать из Rust |
-| `spark-core` | данные мира без GPU: сцена, ассеты, материалы, ввод, время, события, планировщик, очередь звука, виртуальная файловая система |
-| `spark-render` | рендер на wgpu: шейдеры поверхностей и пост-процесса, 2D-канва, окно и headless, скриншоты |
+| `spark-core` | данные мира без GPU: сцена, ассеты, материалы, небо, состояние UI-виджетов, ввод, время, события, планировщик, очередь звука, виртуальная файловая система, WGSL-прелюдии шейдеров |
+| `spark-render` | рендер на wgpu: шейдеры поверхностей и пост-процесса, PBR, небо, встроенные пост-эффекты, 2D-канва, окно и headless, скриншоты |
 | `spark-window` | окно и ввод через winit, геймпады (gilrs) |
 | `spark-audio` | звук на kira |
 | `spark-physics` | физика на rapier3d |
@@ -201,17 +201,6 @@ spark --version
 Ранняя версия (0.1). Основная платформа — Windows 10/11 x64; Linux (X11 / Wayland) и macOS собираются и проходят
 тесты в CI на каждом коммите (headless), но в реальной игре проверены меньше. API ещё может меняться между версиями — `spark docs` держит документацию
 игры в актуальном состоянии.
-
-## Релизы (для мейнтейнеров)
-
-Каждый пуш и pull request запускает [CI](.github/workflows/ci.yml) на Windows, Linux и macOS: clippy (`-D warnings`),
-release-сборка, `cargo test`, `spark new` + `spark check --json`. Бинарники — артефакты `spark-windows-x64`,
-`spark-linux-x64`, `spark-macos-arm64`.
-
-Релиз: поднять `version` в корневом `Cargo.toml`, запушить и создать релиз на GitHub (Releases > Draft a new release,
-тег `v0.1.0`). [Release workflow](.github/workflows/release.yml) соберёт `spark-windows-x64.zip`, `spark-linux-x64.tar.gz`
-и `spark-macos-arm64.tar.gz` и прикрепит их к релизу (пара минут); оттуда их качают `install.ps1`, `install.sh`
-и `spark update` (имена файлов не менять).
 
 ## Лицензия
 
