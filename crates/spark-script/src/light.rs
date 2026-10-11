@@ -133,7 +133,7 @@ pub(crate) fn install(lua: &Lua, g: &Table) -> LuaResult<()> {
             let light = to_light(&Value::Table(spec), "light")?;
             with(lua, |w| {
                 let id = w.spawn_empty();
-                w.scene[id].light = Some(light);
+                w.scene.get_mut(id).ok_or_else(dead)?.light = Some(light);
                 if let Err(e) = apply_props(w, id, Some(rest)) {
                     w.scene.destroy(id);
                     return Err(e);

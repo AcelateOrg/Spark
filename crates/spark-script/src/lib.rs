@@ -16,6 +16,7 @@
 mod api;
 mod audio;
 mod convert;
+mod debug_api;
 mod draw;
 mod flow;
 mod light;

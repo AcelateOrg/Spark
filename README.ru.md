@@ -178,7 +178,7 @@ spark --version
 
 Флаги любой игры: `--headless`, `--frames N`, `--screenshot PATH`, `--dump-scene`, `--size WxH`, `--fixed-dt S`,
 `--no-vsync`, `--splash` / `--no-splash`, `--fullscreen`, `--windowed`, `--help`.
-В окне: F12 — скриншот, F11 / Alt+Enter — полный экран. Переменные окружения: `RUST_LOG=debug`, `WGPU_BACKEND=dx12|vulkan|gl`.
+В окне: F1 — отладочный оверлей, F12 — скриншот, F11 / Alt+Enter — полный экран. Переменные окружения: `RUST_LOG=debug`, `WGPU_BACKEND=dx12|vulkan|gl`.
 
 ## Архитектура
 

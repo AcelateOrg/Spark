@@ -74,3 +74,8 @@ fn stopped(script: &str) {
     assert!(e.contains("infinite loop"), "{script}: {e}");
     assert!(t.elapsed() < std::time::Duration::from_secs(5));
 }
+
+#[test]
+fn debug_contract() {
+    run_script("debug.luau", 10);
+}

@@ -89,21 +89,27 @@ pub(crate) fn apply_props(w: &mut World, id: ObjectId, props: Option<Table>) -> 
         let (k, v) = pair?;
         let what = format!("property '{k}'");
         match k.as_str() {
-            "name" => w.scene[id].name = to_str(&v, &what)?,
-            "position" => w.scene[id].position = to_vec3(&v, &what)?,
-            "rotation" => w.scene[id].rotation = from_euler(to_vec3(&v, &what)?),
-            "scale" => w.scene[id].scale = to_scale(&v, &what)?,
-            "visible" => w.scene[id].visible = to_bool(&v, &what)?,
-            "color" => w.scene[id].material.color = to_color(&v, &what)?,
-            "shader" => w.scene[id].material.shader = crate::shader::to_shader(&v, &what)?,
-            "data" => w.scene[id].material.data = to_data(&[v], &what)?,
-            "blend" => w.scene[id].material.blend = to_blend(&v, &what)?,
-            "double_sided" => w.scene[id].material.double_sided = to_bool(&v, &what)?,
-            "cast_shadow" => w.scene[id].material.cast_shadow = to_bool(&v, &what)?,
+            // set_parent needs &mut World, so handle it before borrowing the object.
             "parent" => set_parent(w, id, to_parent(&v, &what)?)?,
-            "body" => w.scene[id].body = Some(crate::physics::to_body(&v, &what)?),
-            "light" => w.scene[id].light = Some(crate::light::to_light(&v, &what)?),
-            _ => return Err(rt(format!("unknown property '{k}' (allowed: {PROPS})"))),
+            _ => {
+                let o = w.scene.get_mut(id).ok_or_else(dead)?;
+                match k.as_str() {
+                    "name" => o.name = to_str(&v, &what)?,
+                    "position" => o.position = to_vec3(&v, &what)?,
+                    "rotation" => o.rotation = from_euler(to_vec3(&v, &what)?),
+                    "scale" => o.scale = to_scale(&v, &what)?,
+                    "visible" => o.visible = to_bool(&v, &what)?,
+                    "color" => o.material.color = to_color(&v, &what)?,
+                    "shader" => o.material.shader = crate::shader::to_shader(&v, &what)?,
+                    "data" => o.material.data = to_data(&[v], &what)?,
+                    "blend" => o.material.blend = to_blend(&v, &what)?,
+                    "double_sided" => o.material.double_sided = to_bool(&v, &what)?,
+                    "cast_shadow" => o.material.cast_shadow = to_bool(&v, &what)?,
+                    "body" => o.body = Some(crate::physics::to_body(&v, &what)?),
+                    "light" => o.light = Some(crate::light::to_light(&v, &what)?),
+                    _ => return Err(rt(format!("unknown property '{k}' (allowed: {PROPS})"))),
+                }
+            }
         }
     }
     Ok(())
@@ -220,7 +226,7 @@ impl UserData for Obj {
                     Some(p) => w.scene.world_matrix(p).inverse().transform_point3(t),
                     None => t,
                 };
-                w.scene[this.0].look_at(local);
+                w.scene.get_mut(this.0).ok_or_else(dead)?.look_at(local);
                 Ok(())
             })
         });
