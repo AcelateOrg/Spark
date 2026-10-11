@@ -405,6 +405,30 @@ declare function ambient(color: ColorLike): ()
 declare function background(color: ColorLike): ()
 declare function fog(color: ColorLike?, near: number?, far: number?): ()
 
+type BloomSettings = { threshold: number?, knee: number?, strength: number?, radius: number? } | boolean
+type SsaoSettings = { radius: number?, samples: number?, strength: number?, bias: number? } | boolean
+type MotionBlurSettings = { strength: number?, samples: number? } | boolean
+type DofSettings = { focus: number?, aperture: number?, focal_range: number?, samples: number? } | boolean
+type ColorGradingSettings = {
+    exposure: number?, contrast: number?, saturation: number?, temperature: number?, tint: number?,
+    lift: (vector | { number })?, gamma: (vector | { number })?, gain: (vector | { number })?,
+} | boolean
+type ChromaticAberrationSettings = { amount: number?, radial: boolean? } | boolean
+type FilmGrainSettings = { strength: number?, size: number? } | boolean
+type VignetteSettings = { strength: number?, inner: number?, outer: number?, color: ColorLike? } | boolean
+
+type BloomSettings = { threshold: number?, knee: number?, strength: number?, radius: number? } | boolean
+type SsaoSettings = { radius: number?, samples: number?, strength: number?, bias: number? } | boolean
+type MotionBlurSettings = { strength: number?, samples: number? } | boolean
+type DofSettings = { focus: number?, aperture: number?, focal_range: number?, samples: number? } | boolean
+type ColorGradingSettings = {
+    exposure: number?, contrast: number?, saturation: number?, temperature: number?, tint: number?,
+    lift: (vector | { number })?, gamma: (vector | { number })?, gain: (vector | { number })?,
+} | boolean
+type ChromaticAberrationSettings = { amount: number?, radial: boolean? } | boolean
+type FilmGrainSettings = { strength: number?, size: number? } | boolean
+type VignetteSettings = { strength: number?, inner: number?, outer: number?, color: ColorLike? } | boolean
+
 declare graphics: {
     height: number?,
     scale: number,
@@ -419,6 +443,17 @@ declare graphics: {
     shader: Shader?,
     -- Shader, list of Shaders / { shader = s, size = "screen" | "scene" }, or nil
     post: any,
+    -- built-in post effects: nil / false = off, true = defaults, table = settings
+    tonemap: "off" | "aces" | "reinhard" | "hejl",
+    fxaa: boolean,
+    bloom: BloomSettings?,
+    ssao: SsaoSettings?,
+    motion_blur: MotionBlurSettings?,
+    dof: DofSettings?,
+    color_grading: ColorGradingSettings?,
+    chromatic_aberration: ChromaticAberrationSettings?,
+    film_grain: FilmGrainSettings?,
+    vignette: VignetteSettings?,
 }
 
 -- ===================================================================== scheduler, events, tweens

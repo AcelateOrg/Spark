@@ -79,3 +79,8 @@ fn stopped(script: &str) {
 fn debug_contract() {
     run_script("debug.luau", 10);
 }
+
+#[test]
+fn postfx_contract() {
+    run_script("postfx.luau", 10);
+}

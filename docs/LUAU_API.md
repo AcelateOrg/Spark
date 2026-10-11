@@ -382,8 +382,8 @@ t:cancel()
 
 ## Render settings and shaders
 
-Spark has no built-in looks or effects: the default is plain lit rendering, everything else is your own WGSL.
-Full shader reference with examples: [SHADERS.md](SHADERS.md).
+The default is plain lit rendering. Built-in post effects (below) are all off by default; anything else is your own
+WGSL. Full shader reference with examples: [SHADERS.md](SHADERS.md).
 
 ```lua
 graphics.height = 240                -- render the 3D scene 240 px tall (width keeps the aspect), nil = native
@@ -416,6 +416,70 @@ graphics.post = { vhs }                            -- chain of full-screen passe
 - `shader.name`, `shader.kind` (`"surface"` | `"post"`), `shader.params` -> list of param names
 - Per material / object: `mat:with_shader(s)`, `mat:with_data(a, b, c, d)`; `obj.shader`, `obj.data` (read/write);
   spawn props `shader = s`, `data = {a, b, c, d}`. `data` arrives in WGSL as `object.data` (per-object values, e.g. a hit flash).
+
+### Built-in post effects
+
+Each effect is `nil` / `false` (off, default), `true` (default settings) or a table: missing keys keep their defaults,
+unknown keys and wrong types are errors. Reading an effect gives its current settings table (or `nil`).
+They run before your `graphics.post` passes, in this fixed order:
+SSAO -> motion blur -> depth of field -> bloom -> color grading -> tonemap -> FXAA -> chromatic aberration -> film grain -> vignette.
+
+```lua
+graphics.tonemap = "aces"                          -- "off" (default) | "aces" | "reinhard" | "hejl"
+graphics.bloom = { strength = 0.6 }                -- glow around bright pixels
+graphics.vignette = true                           -- defaults
+graphics.color_grading = { saturation = 1.2, gain = vec3(1, 0.95, 0.9) }
+graphics.fxaa = true
+graphics.bloom = nil                               -- off again
+```
+
+| effect | settings (defaults) |
+|---|---|
+| `tonemap` | `"off"` / `"aces"` / `"reinhard"` / `"hejl"` - maps bright (HDR) colors into the screen range |
+| `bloom` | `threshold` 0.8 (brightness where glow starts), `knee` 0.2, `strength` 0.4, `radius` 8 (pixels) |
+| `ssao` | `radius` 0.5 (meters), `samples` 16 (1-64), `strength` 1, `bias` 0.05 (meters) |
+| `motion_blur` | `strength` 1 (fraction of the frame the shutter is open), `samples` 8 (1-32); camera motion only |
+| `dof` | `focus` 10 (meters), `aperture` 2, `focal_range` 3 (meters in focus around `focus`), `samples` 16 |
+| `color_grading` | `exposure` 1, `contrast` 1, `saturation` 1, `temperature` 0 (-1 warm .. 1 cool), `tint` 0 (-1 green .. 1 magenta), `lift` vec3(0) / `gamma` vec3(1) / `gain` vec3(1) (per channel, vec3 or `{r, g, b}`) |
+| `fxaa` | `true` / `false` - smooths edges MSAA misses (shader / alpha edges) |
+| `chromatic_aberration` | `amount` 2 (pixels at the screen edge), `radial` true (false = horizontal split) |
+| `film_grain` | `strength` 0.05, `size` 2 (pixels) |
+| `vignette` | `strength` 0.5, `inner` 0.3, `outer` 0.85 (0 = center, 1 = screen edge), `color` black |
+
+The 3D scene is rendered in HDR (16-bit float) where the GPU supports it, so lights brighter than 1 survive until
+`tonemap` / `bloom`. With `tonemap = "off"` such values are clipped, as before.
+
+### Built-in post effects
+
+Each effect is `nil` / `false` (off, default), `true` (default settings) or a table: missing keys keep their defaults,
+unknown keys and wrong types are errors. Reading an effect gives its current settings table (or `nil`).
+They run before your `graphics.post` passes, in this fixed order:
+SSAO -> motion blur -> depth of field -> bloom -> color grading -> tonemap -> FXAA -> chromatic aberration -> film grain -> vignette.
+
+```lua
+graphics.tonemap = "aces"                          -- "off" (default) | "aces" | "reinhard" | "hejl"
+graphics.bloom = { strength = 0.6 }                -- glow around bright pixels
+graphics.vignette = true                           -- defaults
+graphics.color_grading = { saturation = 1.2, gain = vec3(1, 0.95, 0.9) }
+graphics.fxaa = true
+graphics.bloom = nil                               -- off again
+```
+
+| effect | settings (defaults) |
+|---|---|
+| `tonemap` | `"off"` / `"aces"` / `"reinhard"` / `"hejl"` - maps bright (HDR) colors into the screen range |
+| `bloom` | `threshold` 0.8 (brightness where glow starts), `knee` 0.2, `strength` 0.4, `radius` 8 (pixels) |
+| `ssao` | `radius` 0.5 (meters), `samples` 16 (1-64), `strength` 1, `bias` 0.05 (meters) |
+| `motion_blur` | `strength` 1 (fraction of the frame the shutter is open), `samples` 8 (1-32); camera motion only |
+| `dof` | `focus` 10 (meters), `aperture` 2, `focal_range` 3 (meters in focus around `focus`), `samples` 16 |
+| `color_grading` | `exposure` 1, `contrast` 1, `saturation` 1, `temperature` 0 (-1 warm .. 1 cool), `tint` 0 (-1 green .. 1 magenta), `lift` vec3(0) / `gamma` vec3(1) / `gain` vec3(1) (per channel, vec3 or `{r, g, b}`) |
+| `fxaa` | `true` / `false` - smooths edges MSAA misses (shader / alpha edges) |
+| `chromatic_aberration` | `amount` 2 (pixels at the screen edge), `radial` true (false = horizontal split) |
+| `film_grain` | `strength` 0.05, `size` 2 (pixels) |
+| `vignette` | `strength` 0.5, `inner` 0.3, `outer` 0.85 (0 = center, 1 = screen edge), `color` black |
+
+The 3D scene is rendered in HDR (16-bit float) where the GPU supports it, so lights brighter than 1 survive until
+`tonemap` / `bloom`. With `tonemap = "off"` such values are clipped, as before.
 
 ## Physics
 
