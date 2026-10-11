@@ -1510,8 +1510,9 @@ impl Renderer {
         self.batches = batches;
         self.shadow_batches = shadow_batches;
 
-        // Post shaders read the single-sample depth: resolve it only when there is a post chain.
-        if samples > 1 && !world.render.post.is_empty() {
+        // Post shaders and depth-based built-in effects (SSAO, depth of field, motion blur)
+        // read the single-sample depth: resolve it only when one of them will run.
+        if samples > 1 && (!world.render.post.is_empty() || world.render.postfx.is_active()) {
             if !self.depth_resolve_pipelines.contains_key(&samples) {
                 let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("spark depth resolve"),
