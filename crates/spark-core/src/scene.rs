@@ -42,6 +42,10 @@ pub struct Object {
     pub rotation: Quat,
     pub scale: Vec3,
     pub mesh: Option<MeshId>,
+    /// Level of detail: `(distance, mesh)` pairs. From `distance` meters away from the camera on
+    /// the renderer draws that mesh instead of `mesh` (the entry with the largest distance that is
+    /// reached wins; order does not matter). Picking, physics and bounds use `mesh`.
+    pub lod: Vec<(f32, MeshId)>,
     pub material: Material,
     pub visible: bool,
     /// Rigid body simulated by the physics backend (`None` = not physical).
@@ -76,6 +80,7 @@ impl Object {
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
             mesh: None,
+            lod: Vec::new(),
             material: Material::default(),
             visible: true,
             body: None,
@@ -85,6 +90,17 @@ impl Object {
             local_bounds: Aabb::EMPTY,
             interp: None,
         }
+    }
+
+    /// Mesh drawn at `distance` meters from the camera: the [`Object::lod`] entry with the
+    /// largest distance not above `distance`, or [`Object::mesh`] when none is reached.
+    pub fn mesh_at(&self, distance: f32) -> Option<MeshId> {
+        self.lod
+            .iter()
+            .filter(|(d, _)| *d <= distance)
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, m)| *m)
+            .or(self.mesh)
     }
 
     /// Direct children of this object.
@@ -616,6 +632,19 @@ impl std::ops::IndexMut<ObjectId> for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lod_picks_the_farthest_reached_level() {
+        let mut o = Object::empty();
+        o.mesh = Some(MeshId(0));
+        o.lod = vec![(40.0, MeshId(2)), (10.0, MeshId(1))]; // any order
+        assert_eq!(o.mesh_at(0.0), Some(MeshId(0)));
+        assert_eq!(o.mesh_at(9.9), Some(MeshId(0)));
+        assert_eq!(o.mesh_at(10.0), Some(MeshId(1)));
+        assert_eq!(o.mesh_at(39.0), Some(MeshId(1)));
+        assert_eq!(o.mesh_at(1000.0), Some(MeshId(2)));
+        assert_eq!(Object::empty().mesh_at(5.0), None);
+    }
     use crate::physics::{Body, BodyKind};
 
     #[test]

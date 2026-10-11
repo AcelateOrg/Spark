@@ -94,8 +94,12 @@ struct ObjectUniform {
     normal_matrix: [[f32; 4]; 4],
     color: [f32; 4],
     data: [f32; 4],
-    /// tiling x, tiling y, unlit, -
+    /// tiling x, tiling y, unlit, pbr
     info: [f32; 4],
+    /// metallic, roughness, has normal map, -
+    pbr: [f32; 4],
+    /// rgb (linear), -
+    emissive: [f32; 4],
 }
 
 /// Matches `struct PassInfo` in spark-core/src/shaders/post.wgsl.
@@ -202,6 +206,7 @@ struct Candidate {
     variant: u8,
     mesh: usize,
     texture: Option<usize>,
+    normal_map: Option<usize>,
     /// View-space distance (transparent sorting).
     depth: f32,
     in_view: bool,
@@ -215,6 +220,7 @@ struct Batch3 {
     variant: u8,
     mesh: usize,
     texture: Option<usize>,
+    normal_map: Option<usize>,
     /// Byte offset of the batch's first object (dynamic uniform offset).
     offset: u32,
     count: u32,
@@ -308,6 +314,10 @@ pub struct Renderer {
     meshes: Vec<Option<GpuMesh>>,
     textures: Vec<GpuTexture>,
     white: GpuTexture,
+    /// Flat tangent-space normal (bound as `normal_texture` when a material has no normal map).
+    flat_normal: wgpu::TextureView,
+    /// Texture bind groups of normal-mapped materials: (base texture, normal map, nearest).
+    normal_mapped_groups: HashMap<(Option<usize>, usize, bool), wgpu::BindGroup>,
     assets_generation: u64,
     /// `Assets::mesh_edits` already applied.
     mesh_edits: u64,
@@ -680,7 +690,8 @@ impl Renderer {
                 count: None,
             }],
         );
-        let texture_layout = bind_group_layout(&device, "spark texture", &[texture_entry(0, fs), sampler_entry(1, fs)]);
+        // Base texture, its sampler and the material normal map (2D canvas uses only the first two).
+        let texture_layout = bind_group_layout(&device, "spark texture", &[texture_entry(0, fs), sampler_entry(1, fs), texture_entry(2, fs)]);
         let shader_layout = bind_group_layout(
             &device,
             "spark shader resources",
@@ -807,8 +818,34 @@ impl Renderer {
             bind_group_layouts: &[Some(&post_layout), Some(&shader_layout)],
             immediate_size: 0,
         });
-        let white =
-            upload_texture(&device, &queue, &texture_layout, &texture_samplers, &ImageData::solid(Color::WHITE), COLOR_FORMAT, false);
+        // (128, 128, 255) = +Z in tangent space; read back as data by `surface_normal`.
+        let flat_normal = device
+            .create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("spark flat normal"),
+                    size: extent((1, 1)),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: COLOR_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[128, 128, 255, 255],
+            )
+            .create_view(&Default::default());
+        let white = upload_texture(
+            &device,
+            &queue,
+            &texture_layout,
+            &texture_samplers,
+            &flat_normal,
+            &ImageData::solid(Color::WHITE),
+            COLOR_FORMAT,
+            false,
+        );
 
         let builtin = |name: &str, code: &str| {
             // built-in shaders are known-good at compile time.
@@ -908,6 +945,8 @@ impl Renderer {
             meshes: Vec::new(),
             textures: Vec::new(),
             white,
+            flat_normal,
+            normal_mapped_groups: HashMap::new(),
             assets_generation: u64::MAX,
             mesh_edits: 0,
             candidates: Vec::new(),
@@ -949,6 +988,7 @@ impl Renderer {
         if assets.generation() != self.assets_generation {
             self.meshes.clear();
             self.textures.clear();
+            self.normal_mapped_groups.clear();
             self.shaders.clear();
             self.assets_generation = assets.generation();
         }
@@ -994,9 +1034,9 @@ impl Renderer {
             let gpu = if image.width == 0 || image.height == 0 || image.width > max || image.height > max {
                 log::error!("texture {}x{} is not supported (max {max}x{max}); using magenta", image.width, image.height);
                 let magenta = ImageData::solid(Color::hex(0xff00ff));
-                upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, &magenta, COLOR_FORMAT, false)
+                upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, &self.flat_normal, &magenta, COLOR_FORMAT, false)
             } else {
-                upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, image, COLOR_FORMAT, true)
+                upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, &self.flat_normal, image, COLOR_FORMAT, true)
             };
             self.textures.push(gpu);
         }
@@ -1098,7 +1138,7 @@ impl Renderer {
                 }
                 _ => {
                     self.glyphs =
-                        Some(upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, atlas, GLYPH_FORMAT, false));
+                        Some(upload_texture(&self.device, &self.queue, &self.texture_layout, &self.texture_samplers, &self.flat_normal, atlas, GLYPH_FORMAT, false));
                 }
             }
             self.glyph_version = fonts.version();
@@ -1295,9 +1335,9 @@ impl Renderer {
         let mut stats = FrameStats { internal_size: internal, ..Default::default() };
         let fallback = self.asset_shader(rs.shader, ShaderKind::Surface).unwrap_or(ShaderRef::Default);
         for (id, obj) in scene.iter() {
-            let Some(mesh) = obj.mesh else { continue };
-            let mesh = mesh.0 as usize;
-            let Some(Some(gpu_mesh)) = self.meshes.get(mesh) else { continue };
+            if obj.mesh.is_none() {
+                continue;
+            }
             let i = id.index() as usize;
             if !vis[i] {
                 continue;
@@ -1305,6 +1345,11 @@ impl Renderer {
             let model = mats[i];
             let m = &obj.material;
             let bounds = obj.local_bounds();
+            let center = model.transform_point3(if bounds.is_empty() { Vec3::ZERO } else { (bounds.min + bounds.max) * 0.5 });
+            // Level of detail by camera distance; a missing / empty LOD mesh falls back to the base mesh.
+            let uploaded = |m: Option<spark_core::MeshId>| m.map(|m| m.0 as usize).filter(|&m| matches!(self.meshes.get(m), Some(Some(_))));
+            let Some(mesh) = uploaded(obj.mesh_at(center.distance(cam.position))).or_else(|| uploaded(obj.mesh)) else { continue };
+            let Some(Some(gpu_mesh)) = self.meshes.get(mesh) else { continue };
             let in_view = !outside_frustum(&(view_proj * model), &bounds);
             let transparent = m.is_transparent();
             let caster = shadows && m.cast_shadow && !transparent && !outside_frustum(&(light_vp * model), &bounds);
@@ -1319,19 +1364,23 @@ impl Renderer {
                 BlendMode::Additive => VARIANT_ADDITIVE,
                 _ => 0,
             } | if m.double_sided { VARIANT_DOUBLE_SIDED } else { 0 };
-            let center = model.transform_point3(if bounds.is_empty() { Vec3::ZERO } else { (bounds.min + bounds.max) * 0.5 });
+            let normal_map = m.normal_map.map(|t| t.0 as usize).filter(|&t| t < self.textures.len());
+            let emissive = m.emissive.to_linear();
             cands.push(Candidate {
                 uniform: ObjectUniform {
                     model: model.to_cols_array_2d(),
                     normal_matrix: normal_matrix(&model).to_cols_array_2d(),
                     color: m.color.to_linear(),
                     data: m.data,
-                    info: [m.tiling.x, m.tiling.y, flag(m.unlit), 0.0],
+                    info: [m.tiling.x, m.tiling.y, flag(m.unlit), flag(m.pbr)],
+                    pbr: [m.metallic, m.roughness, flag(normal_map.is_some()), 0.0],
+                    emissive: [emissive[0], emissive[1], emissive[2], 0.0],
                 },
                 shader: self.asset_shader(m.shader, ShaderKind::Surface).unwrap_or(fallback),
                 variant,
                 mesh,
                 texture: m.texture.map(|t| t.0 as usize).filter(|&t| t < self.textures.len()),
+                normal_map,
                 depth: -view.transform_point3(center).z,
                 in_view,
                 caster,
@@ -1367,7 +1416,7 @@ impl Renderer {
         order.sort_by(|&a, &b| {
             let (a, b) = (&cands[a as usize], &cands[b as usize]);
             match (transparent(a), transparent(b)) {
-                (false, false) => (a.variant, a.shader, a.texture, a.mesh).cmp(&(b.variant, b.shader, b.texture, b.mesh)),
+                (false, false) => (a.variant, a.shader, a.texture, a.normal_map, a.mesh).cmp(&(b.variant, b.shader, b.texture, b.normal_map, b.mesh)),
                 (true, true) => b.depth.total_cmp(&a.depth),
                 (ta, tb) => ta.cmp(&tb),
             }
@@ -1393,7 +1442,8 @@ impl Renderer {
             let same = list.last().is_some_and(|b: &Batch3| {
                 (b.count as usize) < MAX_INSTANCES
                     && b.mesh == c.mesh
-                    && (shadow_part || (b.shader == c.shader && b.variant == c.variant && b.texture == c.texture))
+                    && (shadow_part
+                        || (b.shader == c.shader && b.variant == c.variant && b.texture == c.texture && b.normal_map == c.normal_map))
             });
             if same {
                 list.last_mut().expect("batch").count += 1; // checked is_some() above
@@ -1404,6 +1454,7 @@ impl Renderer {
                     variant: c.variant,
                     mesh: c.mesh,
                     texture: c.texture,
+                    normal_map: c.normal_map,
                     offset: scratch.len() as u32,
                     count: 1,
                 });
@@ -1452,6 +1503,32 @@ impl Renderer {
             }
         }
 
+        let nearest = rs.filter == TextureFilter::Nearest;
+        for b in &batches {
+            if let Some(normal) = b.normal_map {
+                let key = (b.texture, normal, nearest);
+                if !self.normal_mapped_groups.contains_key(&key) {
+                    let base = b.texture.map_or(&self.white.view, |t| &self.textures[t].view);
+                    let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("spark normal-mapped material"),
+                        layout: &self.texture_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(base) },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&self.texture_samplers[if nearest { 0 } else { 1 }]),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&self.textures[normal].view),
+                            },
+                        ],
+                    });
+                    self.normal_mapped_groups.insert(key, group);
+                }
+            }
+        }
+
         let target = self.scene_target.as_ref().expect("scene target"); // ensure_scene_target() was called
         let bg = scene.background.to_linear();
         {
@@ -1480,9 +1557,8 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
-            let nearest = rs.filter == TextureFilter::Nearest;
             let (mut last_pipe, mut last_shader, mut last_mesh, mut last_texture) =
-                (None, None, usize::MAX, None::<Option<usize>>);
+                (None, None, usize::MAX, None::<(Option<usize>, Option<usize>)>);
             for b in &batches {
                 if last_pipe != Some((b.shader, b.variant)) {
                     pass.set_pipeline(self.pipeline(b.shader, (self.scene_format, b.variant, samples)));
@@ -1494,10 +1570,16 @@ impl Renderer {
                 }
                 pass.set_bind_group(1, &self.object_bind_group, &[b.offset]);
                 let mesh = self.meshes[b.mesh].as_ref().expect("uploaded mesh"); // candidates filtered to have uploaded meshes
-                if last_texture != Some(b.texture) {
-                    let tex = b.texture.map(|t| &self.textures[t]).unwrap_or(&self.white);
-                    pass.set_bind_group(2, if nearest { &tex.nearest } else { &tex.linear }, &[]);
-                    last_texture = Some(b.texture);
+                if last_texture != Some((b.texture, b.normal_map)) {
+                    let group = match b.normal_map {
+                        Some(normal) => &self.normal_mapped_groups[&(b.texture, normal, nearest)], // created above
+                        None => {
+                            let tex = b.texture.map(|t| &self.textures[t]).unwrap_or(&self.white);
+                            if nearest { &tex.nearest } else { &tex.linear }
+                        }
+                    };
+                    pass.set_bind_group(2, group, &[]);
+                    last_texture = Some((b.texture, b.normal_map));
                 }
                 if last_mesh != b.mesh {
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));
@@ -2138,6 +2220,7 @@ fn upload_texture(
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,
     samplers: &[wgpu::Sampler; 4],
+    normal: &wgpu::TextureView,
     image: &ImageData,
     format: wgpu::TextureFormat,
     mipmaps: bool,
@@ -2166,6 +2249,7 @@ fn upload_texture(
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(normal) },
             ],
         })
     };
@@ -2351,6 +2435,63 @@ mod tests {
         let error = pollster::block_on(scope.pop());
         assert!(error.is_none(), "GPU validation error: {error:?}");
         assert_eq!(r.last_stats().post_passes, 10);
+    }
+
+    /// PBR (metal + rough dielectric), normal maps, emissive and mesh LOD render without GPU
+    /// validation errors, with and without MSAA.
+    #[test]
+    fn pbr_normal_map_and_lod_render() {
+        use spark_core::ImageData;
+        let Ok(mut r) = Renderer::new_headless(64, 64) else { return eprintln!("skipping GPU test: no adapter") };
+        let mut world = World::default();
+        world.scene.background = Color::BLACK;
+        let normal = world.assets.add_texture(ImageData::checker(16, 4, Color::rgb(0.5, 0.5, 1.0), Color::rgb(0.7, 0.5, 0.8)));
+        let base = world.assets.add_texture(ImageData::checker(16, 2, Color::WHITE, Color::GRAY));
+        let sphere = world.add_mesh(MeshData::sphere(0.8, 16));
+        let cube = world.add_mesh(MeshData::cube(1.0));
+        let metal = Material::pbr(Color::WHITE, 1.0, 0.2).with_normal_map(Some(normal));
+        let a = world.spawn(sphere, metal);
+        world.scene.get_mut(a).unwrap().position = Vec3::new(-1.0, 0.0, 0.0);
+        let mut plastic = Material::pbr(Color::RED, 0.0, 0.8).with_normal_map(Some(normal));
+        plastic.texture = Some(base);
+        let b = world.spawn(cube, plastic);
+        world.scene.get_mut(b).unwrap().position = Vec3::new(1.0, 0.0, 0.0);
+        let classic = Material::color(Color::GREEN).with_normal_map(Some(normal));
+        let c = world.spawn(cube, classic);
+        world.scene.get_mut(c).unwrap().position = Vec3::new(0.0, 1.0, 0.0);
+        world.scene.camera.position = Vec3::new(0.0, 0.0, 5.0);
+        world.scene.camera.look_at(Vec3::ZERO);
+        let scope = r.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        for samples in [4, 1] {
+            world.render.msaa = samples;
+            r.screenshot(&world).expect("screenshot");
+        }
+        let error = pollster::block_on(scope.pop());
+        assert!(error.is_none(), "GPU validation error: {error:?}");
+    }
+
+    /// Emissive light shows on a black surface in the dark; past its LOD distance an object
+    /// draws its LOD mesh instead (here a small cube that leaves the edge pixels empty).
+    #[test]
+    fn emissive_and_lod_switch() {
+        let Ok(mut r) = Renderer::new_headless(64, 64) else { return eprintln!("skipping GPU test: no adapter") };
+        let mut world = World::default();
+        world.scene.background = Color::BLACK;
+        world.scene.ambient = Color::BLACK;
+        world.scene.sun.intensity = 0.0;
+        let big = world.add_mesh(MeshData::cube(2.0));
+        let tiny = world.add_mesh(MeshData::cube(0.5));
+        let id = world.spawn(big, Material::pbr(Color::BLACK, 0.0, 1.0).with_emissive(Color::rgb(1.0, 0.0, 0.0)));
+        world.scene.camera.position = Vec3::new(0.0, 0.0, 4.0);
+        world.scene.camera.look_at(Vec3::ZERO);
+        let image = r.screenshot(&world).expect("screenshot");
+        let (center, edge) = (image.pixel(32, 32), image.pixel(20, 32));
+        assert!(center[0] > 200 && center[1] < 40, "emissive not drawn: {center:?}");
+        assert!(edge[0] > 200, "full mesh covers the edge: {edge:?}");
+        world.scene.get_mut(id).unwrap().lod = vec![(3.0, tiny)];
+        let image = r.screenshot(&world).expect("screenshot");
+        assert!(image.pixel(32, 32)[0] > 200, "LOD mesh drawn");
+        assert!(image.pixel(20, 32)[0] < 30, "LOD mesh replaces the full mesh: {:?}", image.pixel(20, 32));
     }
 
     /// Values above 1 reach the tonemapper: Reinhard x / (1 + x) stays above 0.5 (sRGB 188) only

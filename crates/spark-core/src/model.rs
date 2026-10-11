@@ -263,11 +263,24 @@ impl ModelData {
                         gltf::material::AlphaMode::Blend => crate::material::BlendMode::Alpha,
                         _ => crate::material::BlendMode::Opaque,
                     },
+                    // Kept for `obj.pbr = true`; models keep the classic look by default.
+                    metallic: pbr.metallic_factor().clamp(0.0, 1.0),
+                    roughness: pbr.roughness_factor().clamp(0.0, 1.0),
+                    emissive: {
+                        let e = m.emissive_factor();
+                        Color::rgb(to_srgb(e[0]), to_srgb(e[1]), to_srgb(e[2]))
+                    },
                     ..Default::default()
                 };
                 if let Some(info) = pbr.base_color_texture() {
                     match image(info.texture().source().index(), assets) {
                         Ok(id) => material.texture = Some(id),
+                        Err(e) => log::warn!("{}: {e}", model.name),
+                    }
+                }
+                if let Some(info) = m.normal_texture() {
+                    match image(info.texture().source().index(), assets) {
+                        Ok(id) => material.normal_map = Some(id),
                         Err(e) => log::warn!("{}: {e}", model.name),
                     }
                 }

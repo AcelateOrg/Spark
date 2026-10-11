@@ -97,7 +97,16 @@ type SpawnProps = {
     blend: BlendMode?,
     double_sided: boolean?,
     cast_shadow: boolean?,
+    pbr: boolean?,
+    metallic: number?,
+    roughness: number?,
+    emissive: ColorLike?,
+    normal_map: (Texture | string | false)?,
+    lod: { LodLevel }?,
 }
+
+-- `{distance, mesh}`: from `distance` meters away the object draws `mesh`.
+type LodLevel = { number | Mesh }
 
 type Hit = { object: Object, point: vector, normal: vector, distance: number }
 type CollisionInfo = { speed: number, sensor: boolean }
@@ -160,6 +169,15 @@ declare extern type Material with
     blend: BlendMode
     double_sided: boolean
     cast_shadow: boolean
+    pbr: boolean
+    metallic: number
+    roughness: number
+    emissive: Color
+    normal_map: Texture?
+    function with_metallic(self, metallic: number): Material
+    function with_roughness(self, roughness: number): Material
+    function with_emissive(self, color: ColorLike): Material
+    function with_normal_map(self, texture: (Texture | string)?): Material
     function with_shader(self, shader: Shader?): Material
     function with_data(self, a: number, b: number?, c: number?, d: number?): Material
 end
@@ -252,6 +270,12 @@ declare extern type Object with
     blend: BlendMode
     double_sided: boolean
     cast_shadow: boolean
+    pbr: boolean
+    metallic: number
+    roughness: number
+    emissive: Color
+    normal_map: Texture?
+    lod: { LodLevel }
     color: Color
     material: Material?
     mesh: Mesh?
@@ -365,6 +389,7 @@ declare Material: {
     unlit: (color: ColorLike) -> Material,
     texture: (texture: Texture | string, tint: ColorLike?) -> Material,
     checker: (a: ColorLike, b: ColorLike, repeats: number?) -> Material,
+    pbr: (color: ColorLike?, metallic: number?, roughness: number?) -> Material,
 }
 
 declare Color: {

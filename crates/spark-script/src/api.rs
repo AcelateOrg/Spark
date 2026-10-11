@@ -260,6 +260,13 @@ fn install_assets(lua: &Lua, g: &Table) -> LuaResult<()> {
     material.set("color", lua.create_function(|_, c: Value| Ok(LuaMaterial(Material::color(to_color(&c, "Material.color")?))))?)?;
     material.set("unlit", lua.create_function(|_, c: Value| Ok(LuaMaterial(Material::unlit(to_color(&c, "Material.unlit")?))))?)?;
     material.set(
+        "pbr",
+        lua.create_function(|_, (c, metallic, roughness): (Value, Option<f32>, Option<f32>)| {
+            let c = if c.is_nil() { Color::WHITE } else { to_color(&c, "Material.pbr")? };
+            Ok(LuaMaterial(Material::pbr(c, metallic.unwrap_or(0.0), roughness.unwrap_or(0.5))))
+        })?,
+    )?;
+    material.set(
         "texture",
         lua.create_function(|lua, (t, c): (Value, Value)| {
             let bad = || rt("Material.texture: expected a Texture or an image path like \"grass.png\"");

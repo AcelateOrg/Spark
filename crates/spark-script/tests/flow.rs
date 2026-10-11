@@ -37,6 +37,11 @@ fn draw_contract() {
 }
 
 #[test]
+fn pbr_contract() {
+    run_script("pbr.luau", 10);
+}
+
+#[test]
 fn models_contract() {
     run_script("models.luau", 2000);
 }
