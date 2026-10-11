@@ -203,17 +203,6 @@ Conventions: Y-up, right-handed, 1 unit = 1 meter, objects look along -Z, radian
 Early version (0.1). Windows 10/11 x64 is the main and most played platform; Linux (X11 / Wayland) and macOS
 are built and tested by CI on every commit (headless tests), but have seen less real play. The API can still change between versions - `spark docs` keeps a game's docs in sync.
 
-## Releases (maintainers)
-
-Every push and pull request runs the [CI workflow](.github/workflows/ci.yml) on Windows, Linux and macOS:
-clippy (`-D warnings`), release build, `cargo test`, and `spark new` + `spark check --json` on the template game.
-The binaries are uploaded as `spark-windows-x64`, `spark-linux-x64` and `spark-macos-arm64` artifacts.
-
-To release: bump `version` in the root `Cargo.toml`, push, then create a release on GitHub (Releases > Draft a new
-release, tag `v0.1.0`). The [release workflow](.github/workflows/release.yml) builds `spark-windows-x64.zip`,
-`spark-linux-x64.tar.gz` and `spark-macos-arm64.tar.gz` and attaches them to the release (a few minutes);
-`install.ps1`, `install.sh` and `spark update` download them from there (keep the asset names).
-
 ## License
 
 [Mozilla Public License 2.0](LICENSE). You can use Spark in any project, including closed-source and commercial

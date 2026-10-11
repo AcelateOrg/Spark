@@ -202,17 +202,6 @@ spark --version
 тесты в CI на каждом коммите (headless), но в реальной игре проверены меньше. API ещё может меняться между версиями — `spark docs` держит документацию
 игры в актуальном состоянии.
 
-## Релизы (для мейнтейнеров)
-
-Каждый пуш и pull request запускает [CI](.github/workflows/ci.yml) на Windows, Linux и macOS: clippy (`-D warnings`),
-release-сборка, `cargo test`, `spark new` + `spark check --json`. Бинарники — артефакты `spark-windows-x64`,
-`spark-linux-x64`, `spark-macos-arm64`.
-
-Релиз: поднять `version` в корневом `Cargo.toml`, запушить и создать релиз на GitHub (Releases > Draft a new release,
-тег `v0.1.0`). [Release workflow](.github/workflows/release.yml) соберёт `spark-windows-x64.zip`, `spark-linux-x64.tar.gz`
-и `spark-macos-arm64.tar.gz` и прикрепит их к релизу (пара минут); оттуда их качают `install.ps1`, `install.sh`
-и `spark update` (имена файлов не менять).
-
 ## Лицензия
 
 [Mozilla Public License 2.0](LICENSE). Spark можно использовать в любых проектах, включая закрытые и коммерческие
