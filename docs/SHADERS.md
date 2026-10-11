@@ -1,7 +1,8 @@
 # Spark Engine - shaders
 
-Spark ships no looks, presets or effects. Out of the box you get one plain lit shader (sun + ambient + up to 32
-point / spot lights + fog). Everything else - toon, PS1, pixel art, VHS, outlines, CRT - is a small WGSL file in your game.
+Out of the box you get one plain lit shader (sun + ambient + up to 32 point / spot lights + fog) and a set of built-in
+post effects that are off by default (`graphics.bloom`, `graphics.tonemap`, ... - see LUAU_API.md). Everything else -
+toon, PS1, pixel art, VHS, outlines, CRT - is a small WGSL file in your game.
 
 You write **only your function**. The engine adds uniforms, bindings, entry points and helpers before compiling
 (the full prelude is in `crates/spark-core/src/shaders/`). Two kinds:
@@ -54,12 +55,18 @@ frame.sun_dir.xyz, frame.sun_color.rgb, frame.ambient.rgb   // linear
 frame.fog_color.rgb, frame.fog                              // fog: near, far, enabled
 frame.light_count.x, frame.lights[i]                        // Light { position(xyz, w=range), color(rgb, w=1 spot), direction(xyz, w=cos outer), params(x=cos inner) }
 frame.shadow_view_proj, frame.shadow                        // sun shadow map: world -> shadow clip; enabled, 1/size, normal offset, distance
+frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
+frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
 params                                                      // your struct Params
 texture1, texture2, linear_sampler, nearest_sampler
 linear_to_srgb(rgb), srgb_to_linear(rgb)
 ```
 
-All colors are linear; the engine converts to the screen at the end.
+All colors are linear; the engine converts to the screen at the end. The scene and intermediate post images are
+16-bit float where the GPU supports it, so `input_color` can return values above 1 (bright lights); they are clipped
+when written to the screen unless a tonemapper runs. The scene and intermediate post images are
+16-bit float where the GPU supports it, so `input_color` can return values above 1 (bright lights); they are clipped
+when written to the screen unless a tonemapper runs.
 
 ## Surface shaders
 
@@ -119,7 +126,7 @@ fn vertex(v: VertexInput) -> Fragment {
 
 ## Post shaders
 
-Run full-screen, one after another; each pass reads the previous image.
+Run full-screen, one after another; each pass reads the previous image. Enabled built-in effects run first. Enabled built-in effects run first.
 
 ```wgsl
 struct PostInput { position: vec4<f32>, uv: vec2<f32> }   // uv 0..1, top-left = (0, 0)
@@ -155,5 +162,9 @@ let s = world.assets.add_shader("gray", GRAY_WGSL)?;          // or world.assets
 world.assets.shader_mut(s).unwrap().set_param("amount", &[0.8])?;
 world.render.height = Some(240);
 world.render.post = vec![PostPass { shader: s, size: PassSize::Screen }];
+world.render.postfx.bloom = Some(spark_core::render::Bloom { strength: 0.6, ..Default::default() });   // built-in effects
+world.render.postfx.tonemap = spark_core::render::Tonemap::Aces;
+world.render.postfx.bloom = Some(spark_core::render::Bloom { strength: 0.6, ..Default::default() });   // built-in effects
+world.render.postfx.tonemap = spark_core::render::Tonemap::Aces;
 let mat = Material::color(Color::RED).with_shader(Some(toon)).with_data([1.0, 0.0, 0.0, 0.0]);
 ```

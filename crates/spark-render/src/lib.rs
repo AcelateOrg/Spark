@@ -25,6 +25,8 @@ pub use wgpu;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// Scene and intermediate post images when the GPU supports it (see `Renderer::scene_format`).
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
 const CANVAS_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
@@ -66,6 +68,7 @@ struct FrameUniform {
     shadow_view_proj: [[f32; 4]; 4],
     /// enabled, 1 / map size, normal offset, shadow distance
     shadow: [f32; 4],
+    prev_view_proj: [[f32; 4]; 4],
 }
 
 const MAX_LIGHTS: usize = spark_core::Light::MAX_VISIBLE;
@@ -167,6 +170,8 @@ enum ShaderRef {
     Default,
     Copy,
     Asset(usize),
+    /// Built-in post-processing effect.
+    Fx(spark_core::shader::PostFxKind),
 }
 
 struct SceneTarget {
@@ -279,6 +284,10 @@ pub struct Renderer {
     post_pipeline_layout: wgpu::PipelineLayout,
     default_surface: GpuShader,
     copy_post: GpuShader,
+    /// Built-in post-processing effect shaders (indexed by PostFxKind).
+    built_in_post: Vec<GpuShader>,
+    /// ShaderData for built-in post effects (for param value management).
+    built_in_post_data: Vec<spark_core::shader::ShaderData>,
     shaders: Vec<GpuShader>,
     post_targets: Vec<PostTarget>,
     pass_buffers: Vec<wgpu::Buffer>,
@@ -310,6 +319,11 @@ pub struct Renderer {
     world_matrices: Vec<Mat4>,
     world_visible: Vec<bool>,
     device_lost: Arc<AtomicBool>,
+    /// Format of the 3D scene image and intermediate post images: HDR (Rgba16Float) when supported.
+    scene_format: wgpu::TextureFormat,
+    /// (frame number, view_proj) of the last drawn frame and the view_proj before it (motion blur).
+    camera_history: Option<(u64, Mat4)>,
+    prev_view_proj: Mat4,
     /// Numbers about the last frame drawn by [`Renderer::render`] (shown by the debug overlay).
     last_stats: FrameStats,
 }
@@ -521,10 +535,11 @@ impl Renderer {
         self.ensure_capture();
         self.ensure_canvas_pipeline(COLOR_FORMAT);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("spark screenshot") });
-        self.last_stats = self.draw_scene(&mut encoder, world);
+        let mut stats = self.draw_scene(&mut encoder, world);
         // ensure_capture() was just called, so self.capture is Some.
         let capture = self.capture.take().ok_or_else(|| "capture target was not ensured".to_string())?;
-        self.draw_post(&mut encoder, &capture.view, COLOR_FORMAT, world);
+        stats.post_passes = self.draw_post(&mut encoder, &capture.view, COLOR_FORMAT, world);
+        self.last_stats = stats;
         self.capture = Some(capture);
         self.read_capture(encoder)
     }
@@ -612,7 +627,13 @@ impl Renderer {
         });
 
 
-        let adapter_formats = [COLOR_FORMAT, DEPTH_FORMAT]
+        // HDR scene (values above 1 survive until tonemapping / bloom) where the GPU can render,
+        // blend and filter half floats; 8-bit sRGB otherwise (some GLES devices).
+        let hdr = adapter.get_texture_format_features(HDR_FORMAT);
+        let hdr_ok = hdr.allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            && hdr.flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE | wgpu::TextureFormatFeatureFlags::BLENDABLE);
+        let scene_format = if hdr_ok { HDR_FORMAT } else { COLOR_FORMAT };
+        let adapter_formats = [COLOR_FORMAT, DEPTH_FORMAT, scene_format]
             .into_iter()
             .map(|f| (f, adapter.get_texture_format_features(f).flags))
             .collect::<HashMap<_, _>>();
@@ -797,6 +818,19 @@ impl Renderer {
         let default_surface = builtin("spark default surface", "");
         let copy_post = builtin("spark upscale", COPY_POST);
 
+        // Compile all built-in post-processing effect shaders.
+        let mut built_in_post = Vec::with_capacity(spark_core::shader::PostFxKind::COUNT);
+        let mut built_in_post_data = Vec::with_capacity(spark_core::shader::PostFxKind::COUNT);
+        for kind in spark_core::shader::PostFxKind::ALL {
+            let name = kind.name();
+            let code = kind.shader_source();
+            // Validated by spark-core's `builtin_post_effects_compile` test.
+            let data = ShaderData::compile(name, code).unwrap_or_else(|e| panic!("built-in post shader '{name}': {e}"));
+            let gpu = gpu_shader(&device, &shader_layout, &texture_samplers, &white, &[], &data);
+            built_in_post.push(gpu);
+            built_in_post_data.push(data);
+        }
+
         let canvas_layout = bind_group_layout(&device, "spark canvas", &[uniform_entry(0, false, 16, wgpu::ShaderStages::VERTEX)]);
         let canvas_buffer = uniform_buffer(&device, "spark canvas", 16);
         let canvas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -814,8 +848,9 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/canvas.wgsl").into()),
         });
         let mut canvas_pipelines = HashMap::new();
-        canvas_pipelines
-            .insert(COLOR_FORMAT, canvas_pipeline(&device, &canvas_pipeline_layout, &canvas_shader, COLOR_FORMAT));
+        for f in [COLOR_FORMAT, scene_format] {
+            canvas_pipelines.entry(f).or_insert_with(|| canvas_pipeline(&device, &canvas_pipeline_layout, &canvas_shader, f));
+        }
         let canvas_vertices = vertex_buffer(&device, 64 * 1024);
 
         Self {
@@ -854,6 +889,8 @@ impl Renderer {
             post_pipeline_layout,
             default_surface,
             copy_post,
+            built_in_post,
+            built_in_post_data,
             shaders: Vec::new(),
             post_targets: Vec::new(),
             pass_buffers: Vec::new(),
@@ -881,6 +918,9 @@ impl Renderer {
             world_matrices: Vec::new(),
             world_visible: Vec::new(),
             device_lost,
+            scene_format,
+            camera_history: None,
+            prev_view_proj: Mat4::IDENTITY,
             last_stats: FrameStats::default(),
         }
     }
@@ -982,10 +1022,10 @@ impl Renderer {
             })
         };
         let rt = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
-        let color = make("spark scene color", COLOR_FORMAT, rt, 1);
+        let color = make("spark scene color", self.scene_format, rt, 1);
         let depth = make("spark scene depth", DEPTH_FORMAT, rt, 1);
         let (msaa, depth_resolve) = if samples > 1 {
-            let mc = make("spark scene color msaa", COLOR_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, samples);
+            let mc = make("spark scene color msaa", self.scene_format, wgpu::TextureUsages::RENDER_ATTACHMENT, samples);
             let md = make("spark scene depth msaa", DEPTH_FORMAT, rt, samples);
             let (mcv, mdv) = (mc.create_view(&Default::default()), md.create_view(&Default::default()));
             let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1113,11 +1153,27 @@ impl Renderer {
         }
     }
 
+    /// Uploads the parameters of the enabled built-in effects. A name mismatch is an engine bug
+    /// (covered by tests); it is logged instead of panicking a running game.
+    fn update_postfx_params(&mut self, passes: &[(spark_core::shader::PostFxKind, spark_core::render::PostFxParams)]) {
+        for (kind, params) in passes {
+            let i = *kind as usize;
+            let data = &mut self.built_in_post_data[i];
+            for (name, value) in params {
+                if let Err(e) = data.set_param(name, value) {
+                    log::error!("{e}");
+                }
+            }
+            self.queue.write_buffer(&self.built_in_post[i].params, 0, &data.values);
+        }
+    }
+
     fn shader(&self, r: ShaderRef) -> &GpuShader {
         match r {
             ShaderRef::Default => &self.default_surface,
             ShaderRef::Copy => &self.copy_post,
             ShaderRef::Asset(i) => &self.shaders[i],
+            ShaderRef::Fx(k) => &self.built_in_post[k as usize],
         }
     }
 
@@ -1133,6 +1189,7 @@ impl Renderer {
             ShaderRef::Default => &mut self.default_surface,
             ShaderRef::Copy => &mut self.copy_post,
             ShaderRef::Asset(i) => &mut self.shaders[i],
+            ShaderRef::Fx(k) => &mut self.built_in_post[k as usize],
         };
         let layout = match s.kind {
             ShaderKind::Surface => &self.mesh_pipeline_layout,
@@ -1150,7 +1207,7 @@ impl Renderer {
     /// MSAA sample count supported for both scene formats (falls back to 1).
     fn supported_samples(&self, wanted: u32) -> u32 {
         let ok = |n: u32| {
-            [COLOR_FORMAT, DEPTH_FORMAT].iter().all(|f| self.adapter_formats.get(f).is_some_and(|fl| fl.sample_count_supported(n)))
+            [self.scene_format, DEPTH_FORMAT].iter().all(|f| self.adapter_formats.get(f).is_some_and(|fl| fl.sample_count_supported(n)))
         };
         if self.info.backend == "Gl" {
             return 1; // GL / GLES: no multisampled depth reads for the post chain
@@ -1202,6 +1259,11 @@ impl Renderer {
         let texel_world = rs.shadow_distance / shadow_size as f32;
 
         let t = &world.time;
+        // Only a new frame moves the history (a screenshot of the same frame keeps it).
+        if self.camera_history.is_none_or(|(f, _)| f != t.frame) {
+            self.prev_view_proj = self.camera_history.map_or(view_proj, |(_, vp)| vp);
+            self.camera_history = Some((t.frame, view_proj));
+        }
         let frame = FrameUniform {
             view_proj: view_proj.to_cols_array_2d(),
             view: view.to_cols_array_2d(),
@@ -1220,6 +1282,7 @@ impl Renderer {
             lights,
             shadow_view_proj: light_vp.to_cols_array_2d(),
             shadow: [flag(shadows), 1.0 / shadow_size as f32, texel_world * 1.5, rs.shadow_distance],
+            prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
         };
         self.queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
         if shadows {
@@ -1285,14 +1348,14 @@ impl Renderer {
             let ok = match usable.get(&key) {
                 Some(&ok) => ok,
                 None => {
-                    let ok = self.ensure_shader_pipeline(c.shader, (COLOR_FORMAT, c.variant, samples));
+                    let ok = self.ensure_shader_pipeline(c.shader, (self.scene_format, c.variant, samples));
                     usable.insert(key, ok);
                     ok
                 }
             };
             if !ok {
                 c.shader = ShaderRef::Default;
-                self.ensure_shader_pipeline(ShaderRef::Default, (COLOR_FORMAT, c.variant, samples));
+                self.ensure_shader_pipeline(ShaderRef::Default, (self.scene_format, c.variant, samples));
             }
         }
 
@@ -1422,7 +1485,7 @@ impl Renderer {
                 (None, None, usize::MAX, None::<Option<usize>>);
             for b in &batches {
                 if last_pipe != Some((b.shader, b.variant)) {
-                    pass.set_pipeline(self.pipeline(b.shader, (COLOR_FORMAT, b.variant, samples)));
+                    pass.set_pipeline(self.pipeline(b.shader, (self.scene_format, b.variant, samples)));
                     last_pipe = Some((b.shader, b.variant));
                 }
                 if last_shader != Some(b.shader) {
@@ -1517,7 +1580,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.draw_canvas_batches(&mut pass, COLOR_FORMAT, &scene_layer.batches, 0);
+            self.draw_canvas_batches(&mut pass, self.scene_format, &scene_layer.batches, 0);
         }
         stats
     }
@@ -1534,6 +1597,13 @@ impl Renderer {
         let output = (self.width, self.height);
         let scene_size = self.scene_target.as_ref().expect("scene target").size; // ensure_scene_target() was called
         let mut chain: Vec<(ShaderRef, (u32, u32))> = Vec::new();
+
+        // Built-in post effects (run before user passes, at scene resolution).
+        let passes = world.render.postfx.passes();
+        self.update_postfx_params(&passes);
+        chain.extend(passes.iter().map(|(kind, _)| (ShaderRef::Fx(*kind), scene_size)));
+
+        // User-defined post passes.
         for p in &world.render.post {
             let Some(r) = self.asset_shader(Some(p.shader), ShaderKind::Post) else { continue };
             chain.push((r, if p.size == PassSize::Scene { scene_size } else { output }));
@@ -1541,11 +1611,11 @@ impl Renderer {
         if chain.last().is_none_or(|l| l.1 != output) {
             chain.push((ShaderRef::Copy, output));
         }
-        // Pipelines: intermediate passes render to COLOR_FORMAT, the last one to `format`.
+        // Pipelines: intermediate passes render to the scene format, the last one to `format`.
         let n = chain.len();
         let mut keep = Vec::with_capacity(n);
         for (i, (r, _)) in chain.iter().enumerate() {
-            let f = if i + 1 == n { format } else { COLOR_FORMAT };
+            let f = if i + 1 == n { format } else { self.scene_format };
             keep.push(self.ensure_shader_pipeline(*r, (f, 0, 1)));
         }
         let mut chain: Vec<_> = chain.into_iter().zip(keep).filter(|(_, ok)| *ok).map(|(c, _)| c).collect();
@@ -1567,7 +1637,7 @@ impl Renderer {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: COLOR_FORMAT,
+                    format: self.scene_format,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 });
@@ -1621,7 +1691,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(self.pipeline(r, (if last { format } else { COLOR_FORMAT }, 0, 1)));
+            pass.set_pipeline(self.pipeline(r, (if last { format } else { self.scene_format }, 0, 1)));
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_bind_group(1, &self.shader(r).resources, &[]);
             pass.draw(0..3, 0..1);
@@ -2240,5 +2310,60 @@ mod tests {
         assert!(corner[0] < 30, "background not cleared: corner = {corner:?}");
         assert!(r.last_stats().draw_calls >= 1);
         assert!(!r.is_device_lost());
+    }
+
+    fn test_world() -> World {
+        let mut world = World::default();
+        world.scene.background = Color::BLACK;
+        let cube = world.add_mesh(MeshData::cube(2.0));
+        // 4x brighter than white: only an HDR scene keeps that until tonemapping.
+        world.spawn(cube, Material::unlit(Color::rgb(4.0, 4.0, 4.0)));
+        world.scene.camera.position = Vec3::new(0.0, 0.0, 4.0);
+        world.scene.camera.look_at(Vec3::ZERO);
+        world
+    }
+
+    /// All ten built-in effects together render without GPU validation errors.
+    #[test]
+    fn builtin_effects_render() {
+        use spark_core::render::*;
+        let Ok(mut r) = Renderer::new_headless(96, 64) else { return eprintln!("skipping GPU test: no adapter") };
+        let mut world = test_world();
+        world.render.postfx = PostProcessing {
+            tonemap: Tonemap::Aces,
+            bloom: Some(Bloom::default()),
+            ssao: Some(Ssao::default()),
+            motion_blur: Some(MotionBlur::default()),
+            dof: Some(DepthOfField::default()),
+            color_grading: Some(ColorGrading::default()),
+            fxaa: true,
+            chromatic_aberration: Some(ChromaticAberration::default()),
+            film_grain: Some(FilmGrain::default()),
+            vignette: Some(Vignette::default()),
+        };
+        let scope = r.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        for frame in 1..=3 {
+            world.time.frame = frame;
+            world.scene.camera.position.x = frame as f32 * 0.1; // moving camera: motion blur path
+            r.screenshot(&world).expect("screenshot");
+        }
+        let error = pollster::block_on(scope.pop());
+        assert!(error.is_none(), "GPU validation error: {error:?}");
+        assert_eq!(r.last_stats().post_passes, 10);
+    }
+
+    /// Values above 1 reach the tonemapper: Reinhard x / (1 + x) stays above 0.5 (sRGB 188) only
+    /// if the scene kept x > 1; an 8-bit scene clips to 1.0 first and gives exactly ~188.
+    #[test]
+    fn hdr_scene_reaches_tonemapper() {
+        use spark_core::render::Tonemap;
+        let Ok(mut r) = Renderer::new_headless(64, 64) else { return eprintln!("skipping GPU test: no adapter") };
+        if r.scene_format != HDR_FORMAT {
+            return eprintln!("skipping: adapter has no HDR render target");
+        }
+        let mut world = test_world();
+        world.render.postfx.tonemap = Tonemap::Reinhard;
+        let center = r.screenshot(&world).expect("screenshot").pixel(32, 32);
+        assert!((200..=252).contains(&center[0]), "center = {center:?}");
     }
 }
