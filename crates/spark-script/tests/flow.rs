@@ -4,8 +4,12 @@ use spark_core::{Game, World, run_frame};
 use spark_script::ScriptGame;
 
 fn run_script(name: &str, max_frames: u32) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scripts").join(name);
-    let mut game = ScriptGame::new(path).hot_reload(false);
+    run_script_at(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scripts").join(name), max_frames);
+}
+
+fn run_script_at(path: &std::path::Path, max_frames: u32) {
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let mut game = ScriptGame::new(path.to_path_buf()).hot_reload(false);
     let mut world = World::new();
     world.physics.set_backend(Box::new(spark_physics::RapierBackend::new()));
     game.start(&mut world);
@@ -39,6 +43,21 @@ fn draw_contract() {
 #[test]
 fn pbr_contract() {
     run_script("pbr.luau", 10);
+}
+
+/// Runs from a temp folder next to generated images (a valid 6:1 cubemap strip and a square one).
+#[test]
+fn sky_contract() {
+    use spark_core::{Color, ImageData};
+    let dir = std::env::temp_dir().join(format!("spark-sky-contract-{}", std::process::id()));
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scripts/sky.luau");
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::copy(src, dir.join("sky.luau")).unwrap();
+    ImageData::checker(12, 6, Color::WHITE, Color::BLACK).save_png(&dir.join("assets/not_a_strip.png")).unwrap();
+    let strip = ImageData::new(12, 2, [40, 90, 200, 255].repeat(24));
+    strip.save_png(&dir.join("assets/sky_strip.png")).unwrap();
+    run_script_at(&dir.join("sky.luau"), 10);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -56,6 +56,7 @@ frame.fog_color.rgb, frame.fog                              // fog: near, far, e
 frame.light_count.x, frame.lights[i]                        // Light { position(xyz, w=range), color(rgb, w=1 spot), direction(xyz, w=cos outer), params(x=cos inner) }
 frame.shadow_view_proj, frame.shadow                        // sun shadow map: world -> shadow clip; enabled, 1/size, normal offset, distance
 frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
+frame.sky_top.rgb, frame.sky_bottom.rgb, frame.sky          // sky gradient (linear); enabled, cubemap blend, lighting, cubemap mips
 frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
 params                                                      // your struct Params
 texture1, texture2, linear_sampler, nearest_sampler
@@ -98,6 +99,9 @@ surface_normal(world_pos, normal, uv) -> vec3<f32>  // normal with the material 
 pbr_lighting(world_pos, normal, base_rgb, metallic, roughness) -> vec3<f32>  // PBR version of base * lighting()
 sun_shadow(world_pos, normal) -> f32       // 1 = lit, 0 = in the sun's shadow (PCF); 1 when shadows are off
 apply_fog(rgb, world_pos) -> vec3<f32>
+sky_color(dir, blur) -> vec3<f32>          // sky in a world direction (blur 0 = sharp .. 1 = blurriest mip); black without a sky
+ambient_light(normal) -> vec3<f32>         // indirect light: the sky with sky lighting on, else frame.ambient
+ambient_reflection(dir, roughness) -> vec3<f32>  // environment reflection along `dir` (PBR specular ambient)
 default_fragment(f) -> vec4<f32>
 ```
 

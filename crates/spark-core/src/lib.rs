@@ -36,7 +36,7 @@ pub mod world;
 pub use glam::{self, EulerRot, Mat3, Mat4, Quat, Vec2, Vec3, Vec4, vec2, vec3, vec4};
 
 pub use animation::{AnimParams, Animator};
-pub use assets::{Assets, ImageData, MeshId, TextureId};
+pub use assets::{Assets, CUBE_FACES, CubemapId, ImageData, MeshId, TextureId};
 pub use audio::{Audio, AudioBackend, AudioCommand, BusId, PlayParams, SoundId, SoundSource};
 pub use branding::{BadgeParams, BadgeState, Branding, SPARK_URL, Splash};
 pub use camera::Camera;
@@ -53,7 +53,7 @@ pub use model::{ModelData, ModelId};
 pub use pick::PickHit;
 pub use physics::{Body, BodyKind, CharacterMove, Collision, Physics, PhysicsBackend, RayHit, Shape};
 pub use render::{PassSize, PostPass, RenderSettings, TextureFilter};
-pub use scene::{Fog, Light, LightKind, Object, ObjectId, Scene, Sun};
+pub use scene::{Fog, Light, LightKind, Object, ObjectId, Scene, Sky, Sun};
 pub use schedule::{Scheduler, TimerId};
 pub use shader::{Param, ParamType, ShaderData, ShaderId, ShaderKind};
 pub use text::{FontId, Fonts};

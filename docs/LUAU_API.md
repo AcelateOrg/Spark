@@ -380,6 +380,12 @@ t:cancel()
 - Default camera: position (0, 3, 8) looking at the origin.
 - `sun(direction, color?, intensity?)` - direction the light travels, e.g. `vec3(-0.5, -1, -0.3)`
 - `ambient(color)`, `background(color)`, `fog(color, near=10, far=60)`, `fog(nil)` to disable
+- `sky({ top = "sky", bottom = "#40382f", cubemap = "sky.png", blend = 1, lighting = 0 })` - sky behind everything
+  instead of the flat background; every key is optional, `sky(true)` = default blue sky, `sky(nil)` to remove.
+  `top` / `bottom` = gradient colors straight up / down; `cubemap` = image path of a 6:1 horizontal strip of square
+  faces in +X, -X, +Y, -Y, +Z, -Z order (cached by path), drawn over the gradient with `blend` (0..1);
+  `lighting` = image-based lighting strength: 0 keeps `ambient()`, above 0 the sky lights objects from every
+  direction (blue from above, ground color from below) and PBR metals reflect it (rougher = blurrier)
 - Point / spot lights (up to 32 nearest visible lights per frame; any object can carry one):
   - `light({ type = "point", color = "#ffd9a0", intensity = 1.5, range = 8, position = vec3(0, 3, 0) })` -> Object (invisible, only light)
   - `light({ type = "spot", angle = 30, softness = 0.3, ... })` - cone along the object's forward (-Z); aim with `rotation` or `obj:look_at(...)`
