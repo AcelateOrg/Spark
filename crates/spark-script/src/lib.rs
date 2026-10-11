@@ -384,6 +384,10 @@ impl Game for ScriptGame {
             draw_error(world, "Shader error", msg, "Fix the shader and save it: it reloads automatically (the previous version keeps running).");
         }
     }
+
+    fn error(&self) -> Option<&str> {
+        self.error.as_deref().or(self.shader_error.as_deref())
+    }
 }
 
 impl Drop for ScriptGame {

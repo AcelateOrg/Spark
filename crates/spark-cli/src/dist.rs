@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn plist_is_escaped() {
-        let p = info_plist("My_Game", "A <b> & c");
+        let p = info_plist("My_Game", "A <b> & c", false);
         assert!(p.contains("<string>A &lt;b&gt; &amp; c</string>"));
         assert!(p.contains("<key>CFBundleExecutable</key><string>My_Game</string>"));
         assert!(p.contains("com.sparkgames.my-game"));

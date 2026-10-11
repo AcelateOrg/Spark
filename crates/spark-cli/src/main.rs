@@ -2,6 +2,7 @@
 //! Without a path: `main.luau` in the current folder, else next to the executable (shipped games:
 //! put the exe, `main.luau` and the assets in one folder and double-click the exe).
 //!
+//! `spark editor [path/to/game]` - opens Spark Editor (welcome screen, or the game when it is a Spark project).
 //! `spark new path/to/game` - a new game with the recommended folder layout (+ AGENTS.md and the API docs).
 //! `spark docs path/to/game` - refresh the API docs inside a game after an engine update.
 //! `spark update [version]` - replace this spark executable with a GitHub release (Windows, Linux, macOS).
@@ -13,10 +14,12 @@
 
 mod check;
 mod dist;
+mod editor;
 mod icon;
-mod manifest;
 mod new;
 mod update;
+
+use spark_project::manifest;
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +30,7 @@ use manifest::Manifest;
 
 const USAGE: &str = "Usage:
   spark path/to/game [flags]              run a game (folder with main.luau, or the .luau file)
+  spark editor [path/to/game]             open Spark Editor (the game, or the welcome screen)
   spark new path/to/game                  create a new game with the recommended layout
   spark docs path/to/game                 write the API docs + AGENTS.md (for AI agents) into a game
   spark check path/to/game [--frames N]   find script errors without a window or GPU (default 60 frames)
@@ -47,6 +51,7 @@ fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     match raw.first().map(String::as_str) {
         Some("build") => std::process::exit(dist::run(&raw[1..])),
+        Some("editor") => std::process::exit(editor::run(&raw[1..])),
         Some("new") => std::process::exit(new::run(&raw[1..])),
         Some("docs") => std::process::exit(new::run_docs(&raw[1..])),
         Some("check") => std::process::exit(check::run(&raw[1..])),

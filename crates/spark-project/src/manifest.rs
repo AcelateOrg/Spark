@@ -69,11 +69,18 @@ impl Manifest {
     /// Reads `dir/game.toml` (missing file = defaults).
     pub fn load(dir: &Path) -> Result<Self, String> {
         let path = dir.join(FILE);
-        if !engine::vfs::is_file(&path) {
+        if !spark_core::vfs::is_file(&path) {
             return Ok(Self::default());
         }
-        let text = engine::vfs::read_string(&path)?;
+        let text = spark_core::vfs::read_string(&path)?;
         Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// The window / build title: `title` from game.toml, else the folder name.
+    pub fn display_title(&self, dir: &Path) -> String {
+        self.title.clone().unwrap_or_else(|| {
+            dir.file_name().map(|n| n.to_string_lossy().into_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Spark".into())
+        })
     }
 
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -147,7 +154,7 @@ impl Manifest {
 }
 
 /// "0.1" / "0.1.2" / "1" -> (major, minor, patch).
-fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
+pub fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
     let mut it = s.trim().trim_start_matches('v').split('.');
     let major = it.next()?.parse().ok()?;
     let minor = it.next().map_or(Some(0), |p| p.parse().ok())?;

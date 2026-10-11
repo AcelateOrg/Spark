@@ -1,0 +1,36 @@
+[package]
+name = "spark-editor"
+description = "Spark Editor: project manager, code editor, game runner and live debugger for Spark games."
+version.workspace = true
+edition.workspace = true
+# egui 0.36 needs a newer compiler than the engine (the engine itself stays on rust-version 1.85).
+rust-version = "1.95"
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "spark-editor"
+path = "src/main.rs"
+
+[features]
+# Release builds: no console window on Windows.
+gui = []
+
+[dependencies]
+spark-project.workspace = true
+spark-devtools.workspace = true
+# Same wgpu (30) / winit (0.30) as the engine: a game viewport inside the editor can share the GPU device later.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
+egui_dock = "0.21"
+rfd = "0.17"
+notify = "8"
+trash = "5"
+dirs = "7"
+toml = "1"
+sys-locale = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true

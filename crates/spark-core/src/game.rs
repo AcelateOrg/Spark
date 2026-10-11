@@ -29,6 +29,12 @@ pub trait Game {
 
     /// Called every frame after `late_update`: draw 2D shapes, sprites and text on `world.canvas`.
     fn draw(&mut self, _world: &mut World) {}
+
+    /// The error that currently stops the game, if any (a script error shown on screen).
+    /// Tools like Spark Editor display it; `None` = running fine.
+    fn error(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Runs one frame of game logic (steps 2-7). Used by every runner so they behave identically.
