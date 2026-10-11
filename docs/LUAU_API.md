@@ -280,6 +280,12 @@ Primitives are centered at the origin (a cube of size 1 spans -0.5..0.5). Same p
 | `mat:with_blend("alpha")` | `"auto"` (default: alpha when color alpha < 1), `"opaque"`, `"alpha"` (glass, water, fades), `"additive"` (fire, glow) |
 | `mat:with_double_sided(true)`, `mat:with_cast_shadow(false)` | draw back faces (leaves, flags); no sun shadow |
 | `mat.blend`, `mat.double_sided`, `mat.cast_shadow` | read; objects also have `obj.blend`, `obj.double_sided`, `obj.cast_shadow` (read/write, also `spawn` props) |
+| `Material.pbr(c="white", metallic=0, roughness=0.5)` | physically based (Cook-Torrance GGX): metals reflect the ambient light and have tinted highlights |
+| `mat:with_metallic(m)`, `mat:with_roughness(r)` | 0..1 (clamped); either one turns PBR shading on |
+| `mat:with_emissive(c)` | light the surface gives off by itself (screens, lava, lamps); works in every mode, pairs well with bloom |
+| `mat:with_normal_map(tex_or_path)` | tangent-space normal map (OpenGL convention, green = up); `nil` removes it; works with and without PBR |
+| `mat.pbr`, `mat.metallic`, `mat.roughness`, `mat.emissive`, `mat.normal_map` | read; objects have the same names (read/write, also `spawn` props); setting `obj.metallic` / `obj.roughness` turns PBR on |
+| `obj.lod = { {20, mid}, {60, low} }` | level of detail: from 20 m away draw `mid`, from 60 m `low` (also a `spawn` prop; `{}` = off) |
 | `Color.rgb(r,g,b)`, `Color.rgba(r,g,b,a)`, `Color.hex("#ff8800")`, `Color.lerp(a,b,t)` | |
 | `Color.RED`, `Color.SKY`, ... | uppercase names of the color list above |
 | `color.r .g .b .a`, `color:lerp(c, t)`, `color:with_alpha(a)` | |
@@ -328,9 +334,10 @@ spawn(Mesh.box(0.1, 0.1, 0.6), "gray", { parent = hero:find("hand.R") })   -- sw
 
 - Formats: `.glb` (recommended) and `.gltf` (+ .bin / images next to it). Export from Blender: File > Export > glTF 2.0,
   "+Y up", forward = -Z for Spark (models face -Z like every Spark object; `obj:look_at` turns -Z to the target).
-- Supported: meshes (triangles), node hierarchy, base color factor + base color texture, `KHR_materials_unlit`,
+- Supported: meshes (triangles), node hierarchy, base color factor + base color texture, normal map, emissive
+  factor, metallic / roughness factors (used once you set `pbr = true` on its objects), `KHR_materials_unlit`,
   skins (up to 4 bones per vertex, CPU skinning), animations of translation / rotation / scale (step, linear, cubic).
-  Not (yet): morph targets, PBR maps (normal / metal-rough are ignored), cameras / lights in the file.
+  Not (yet): morph targets, metal-rough / emissive / occlusion textures, cameras / lights in the file.
 - `Model.load(path)` -> Model (cached by path). `model.name`, `model.animations` (list of clip names), `model.size`
   (bind-pose size vector), `model:duration(name)`.
 - `spawn(model_or_path, material?, props?)` -> root Object (empty, named after the file); every glTF node becomes a

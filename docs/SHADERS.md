@@ -80,8 +80,10 @@ struct Fragment {
     custom: vec4<f32>,     // free: pass anything from vertex to fragment
     spark_instance: u32,   // engine-managed (instanced drawing): leave it alone
 }
-object.model, object.normal_matrix, object.color (linear), object.data, object.info (tiling x, tiling y, unlit 0/1)
+object.model, object.normal_matrix, object.color (linear), object.data, object.info (tiling x, tiling y, unlit 0/1, pbr 0/1)
+object.pbr (metallic, roughness, has normal map 0/1, -), object.emissive (linear rgb)
 base_texture, base_sampler                 // material texture (white if none), sampled with graphics.filter
+normal_texture                             // material normal map (flat if none), sampled with base_sampler
 // `object` is the object being drawn. Objects with the same mesh / material state are drawn in one
 // instanced draw call; that is invisible to shaders (always use `default_vertex` or start from
 // `var f: Fragment;` / `var f = default_vertex(v);` and return `f`, the engine fills spark_instance).
@@ -92,6 +94,8 @@ base_texture, base_sampler                 // material texture (white if none), 
 default_vertex(v) -> Fragment
 surface_color(uv) -> vec4<f32>             // object.color * base texture
 lighting(world_pos, normal) -> vec3<f32>   // ambient + sun (with shadows) + lights
+surface_normal(world_pos, normal, uv) -> vec3<f32>  // normal with the material normal map applied (normalized)
+pbr_lighting(world_pos, normal, base_rgb, metallic, roughness) -> vec3<f32>  // PBR version of base * lighting()
 sun_shadow(world_pos, normal) -> f32       // 1 = lit, 0 = in the sun's shadow (PCF); 1 when shadows are off
 apply_fog(rgb, world_pos) -> vec3<f32>
 default_fragment(f) -> vec4<f32>

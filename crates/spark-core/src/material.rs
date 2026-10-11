@@ -59,6 +59,17 @@ pub struct Material {
     pub double_sided: bool,
     /// Casts a shadow from the sun (`RenderSettings::shadows`).
     pub cast_shadow: bool,
+    /// Physically based shading (Cook-Torrance GGX with `metallic` / `roughness`) instead of the
+    /// classic diffuse look. Turned on by [`Material::pbr`], `with_metallic`, `with_roughness`.
+    pub pbr: bool,
+    /// 0 = dielectric (plastic, wood, stone), 1 = metal. Used when `pbr` is on.
+    pub metallic: f32,
+    /// 0 = mirror-smooth, 1 = fully rough. Used when `pbr` is on.
+    pub roughness: f32,
+    /// Light the surface emits by itself, added after lighting (black = none). Works in every mode.
+    pub emissive: Color,
+    /// Tangent-space normal map (OpenGL convention: green points along +V). Works with and without `pbr`.
+    pub normal_map: Option<TextureId>,
 }
 
 impl Default for Material {
@@ -73,6 +84,11 @@ impl Default for Material {
             blend: BlendMode::Auto,
             double_sided: false,
             cast_shadow: true,
+            pbr: false,
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive: Color::BLACK,
+            normal_map: None,
         }
     }
 }
@@ -146,6 +162,40 @@ impl Material {
         self.data = data;
         self
     }
+
+    /// PBR material: base `color`, `metallic` (0..1) and `roughness` (0..1).
+    pub fn pbr(color: Color, metallic: f32, roughness: f32) -> Self {
+        Self::color(color).with_metallic(metallic).with_roughness(roughness)
+    }
+
+    /// Sets `metallic` (clamped to 0..1) and turns on PBR shading.
+    pub fn with_metallic(mut self, metallic: f32) -> Self {
+        self.metallic = unit(metallic);
+        self.pbr = true;
+        self
+    }
+
+    /// Sets `roughness` (clamped to 0..1) and turns on PBR shading.
+    pub fn with_roughness(mut self, roughness: f32) -> Self {
+        self.roughness = unit(roughness);
+        self.pbr = true;
+        self
+    }
+
+    pub fn with_emissive(mut self, emissive: Color) -> Self {
+        self.emissive = emissive;
+        self
+    }
+
+    pub fn with_normal_map(mut self, normal_map: Option<TextureId>) -> Self {
+        self.normal_map = normal_map;
+        self
+    }
+}
+
+/// Clamps to 0..1; NaN becomes 0 so it never reaches the shader.
+fn unit(v: f32) -> f32 {
+    if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) }
 }
 
 #[cfg(test)]
@@ -180,5 +230,25 @@ mod tests {
         assert_eq!(m.blend, BlendMode::Additive);
         assert!(m.double_sided);
         assert_eq!(m.tiling, Vec2::new(2.0, 3.0));
+    }
+
+    #[test]
+    fn pbr_is_opt_in() {
+        let m = Material::default();
+        assert!(!m.pbr, "existing games keep the classic look");
+        assert_eq!((m.metallic, m.roughness, m.emissive, m.normal_map), (0.0, 0.5, Color::BLACK, None));
+    }
+
+    #[test]
+    fn pbr_builders_clamp_and_enable() {
+        let m = Material::pbr(Color::RED, 2.0, -1.0);
+        assert!(m.pbr);
+        assert_eq!((m.metallic, m.roughness), (1.0, 0.0));
+        assert_eq!(m.color, Color::RED);
+        assert!(Material::default().with_roughness(0.5).pbr, "even the default value turns PBR on");
+        let n = Material::pbr(Color::RED, f32::NAN, f32::NAN);
+        assert_eq!((n.metallic, n.roughness), (0.0, 0.0), "NaN never reaches the shader");
+        let e = Material::default().with_emissive(Color::BLUE);
+        assert!(!e.pbr, "emissive works without PBR");
     }
 }
