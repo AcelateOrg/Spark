@@ -429,6 +429,8 @@ declare function sun(direction: vector, color: ColorLike?, intensity: number?): 
 declare function ambient(color: ColorLike): ()
 declare function background(color: ColorLike): ()
 declare function fog(color: ColorLike?, near: number?, far: number?): ()
+type SkySpec = { top: ColorLike?, bottom: ColorLike?, cubemap: (string | false)?, blend: number?, lighting: number? }
+declare function sky(spec: (SkySpec | boolean)?): ()
 
 type BloomSettings = { threshold: number?, knee: number?, strength: number?, radius: number? } | boolean
 type SsaoSettings = { radius: number?, samples: number?, strength: number?, bias: number? } | boolean

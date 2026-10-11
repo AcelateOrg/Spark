@@ -88,6 +88,9 @@ pub const MAX_PARAMS_SIZE: usize = 256;
 const COMMON: &str = include_str!("shaders/common.wgsl");
 const SURFACE: &str = include_str!("shaders/surface.wgsl");
 const POST: &str = include_str!("shaders/post.wgsl");
+/// Sky bindings and helpers (`sky_color`, `ambient_light`): surface shaders and the skybox pass.
+const SKY: &str = include_str!("shaders/sky.wgsl");
+const SKYBOX: &str = include_str!("shaders/skybox.wgsl");
 
 /// A compiled (validated) shader plus its parameter values.
 #[derive(Clone, Debug)]
@@ -186,6 +189,12 @@ fn defines_struct(code: &str, name: &str) -> bool {
         || code.contains(&format!("struct {name}{{"))
 }
 
+/// Full WGSL of the skybox pass (`sky_vs` / `sky_fs`). It shares `sky_color` with surface
+/// shaders, so the sky behind objects matches their reflections.
+pub fn skybox_source() -> String {
+    format!("{COMMON}{SKY}{SKYBOX}")
+}
+
 /// Game code + engine prelude for `kind`.
 pub fn compose(code: &str, kind: ShaderKind) -> String {
     let mut s = String::with_capacity(code.len() + 8192);
@@ -198,6 +207,7 @@ pub fn compose(code: &str, kind: ShaderKind) -> String {
         ShaderKind::Surface => {
             let vs = if defines_fn(code, "vertex") { "vertex" } else { "default_vertex" };
             let fs = if defines_fn(code, "fragment") { "fragment" } else { "default_fragment" };
+            s.push_str(SKY);
             s.push_str(&SURFACE.replace("SPARK_VERTEX", vs).replace("SPARK_FRAGMENT", fs));
         }
         ShaderKind::Post => s.push_str(POST),
@@ -500,5 +510,16 @@ mod postfx_tests {
             }
         }
         assert!(errors.is_empty(), "{}", errors.join("\n\n"));
+    }
+
+    #[test]
+    fn skybox_shader_is_valid() {
+        let source = skybox_source();
+        let module = naga::front::wgsl::parse_str(&source).map_err(|e| e.emit_to_string(&source)).unwrap();
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
+            .validate(&module)
+            .map_err(|e| e.emit_to_string(&source))
+            .unwrap();
+        assert!(module.entry_points.iter().any(|e| e.name == "sky_vs") && module.entry_points.iter().any(|e| e.name == "sky_fs"));
     }
 }

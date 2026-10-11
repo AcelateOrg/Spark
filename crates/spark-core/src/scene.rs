@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 
-use crate::assets::MeshId;
+use crate::assets::{CubemapId, MeshId};
 use crate::camera::Camera;
 use crate::color::Color;
 use crate::material::Material;
@@ -223,6 +223,48 @@ pub struct Fog {
     pub far: f32,
 }
 
+/// Sky drawn behind every object (instead of the flat `background` color). It can also light
+/// the scene (image-based lighting): see [`Sky::lighting`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sky {
+    /// Color straight up; the sky fades to `bottom` straight down (the horizon is halfway).
+    pub top: Color,
+    /// Color straight down.
+    pub bottom: Color,
+    /// Optional cubemap (photo or painted sky), drawn over the gradient.
+    pub cubemap: Option<CubemapId>,
+    /// How much of the cubemap covers the gradient, 0..1.
+    pub blend: f32,
+    /// Image-based lighting strength. 0 = off (objects use the flat `ambient` color);
+    /// above 0 the sky replaces the ambient light (blue from above, ground color from below)
+    /// and PBR surfaces reflect it.
+    pub lighting: f32,
+}
+
+impl Sky {
+    /// Two-color gradient sky.
+    pub fn gradient(top: Color, bottom: Color) -> Self {
+        Self { top, bottom, cubemap: None, blend: 1.0, lighting: 0.0 }
+    }
+
+    /// Cubemap sky (see [`crate::Assets::load_cubemap`]).
+    pub fn cubemap(cubemap: CubemapId) -> Self {
+        Self { cubemap: Some(cubemap), ..Self::default() }
+    }
+
+    /// Sets the image-based lighting strength (0 = off).
+    pub fn with_lighting(mut self, lighting: f32) -> Self {
+        self.lighting = lighting.max(0.0);
+        self
+    }
+}
+
+impl Default for Sky {
+    fn default() -> Self {
+        Self::gradient(Color::rgb(0.38, 0.62, 0.92), Color::rgb(0.22, 0.2, 0.18))
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Slot {
     generation: u32,
@@ -240,6 +282,8 @@ pub struct Scene {
     pub ambient: Color,
     pub background: Color,
     pub fog: Option<Fog>,
+    /// Sky behind everything; `None` = clear to `background`.
+    pub sky: Option<Sky>,
 }
 
 impl Default for Scene {
@@ -259,6 +303,7 @@ impl Scene {
             ambient: Color::rgb(0.35, 0.38, 0.45),
             background: Color::rgb(0.08, 0.09, 0.12),
             fog: None,
+            sky: None,
         }
     }
 

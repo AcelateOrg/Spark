@@ -84,7 +84,7 @@ fn sun_shadow(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
 fn lighting(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let n = normalize(normal);
     let sun = max(dot(n, normalize(-frame.sun_dir.xyz)), 0.0);
-    var light = frame.ambient.rgb;
+    var light = ambient_light(n);
     if (sun > 0.0) {
         light = light + frame.sun_color.rgb * sun * sun_shadow(world_pos, n);
     }
@@ -171,14 +171,15 @@ fn pbr_direct(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>, bas
     return (diffuse + specular * PI) * radiance * n_dot_l;
 }
 
-// Ambient light on a PBR surface: diffuse plus a rough environment reflection of the ambient color
-// (so metals are not black without lights).
+// Ambient light on a PBR surface: diffuse plus the environment reflection (the sky with sky
+// lighting on, else the ambient color), so metals are not black without lights.
 fn pbr_ambient(n: vec3<f32>, v: vec3<f32>, base: vec3<f32>, metallic: f32, roughness: f32) -> vec3<f32> {
     let n_dot_v = max(dot(n, v), 1e-4);
     let f0 = mix(vec3<f32>(0.04), base, metallic);
     let env = env_brdf_approx(roughness, n_dot_v);
     let specular = f0 * env.x + env.y;
-    return frame.ambient.rgb * ((1.0 - specular) * (1.0 - metallic) * base + specular);
+    let diffuse = ambient_light(n) * (1.0 - specular) * (1.0 - metallic) * base;
+    return diffuse + ambient_reflection(reflect(-v, n), roughness) * specular;
 }
 
 // Full PBR lighting of a surface point: ambient + sun (with shadows) + point / spot lights.

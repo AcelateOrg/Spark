@@ -15,8 +15,8 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use spark_core::shader::{COPY_POST, MAX_PARAMS_SIZE};
 use spark_core::{
-    Aabb, Assets, Batch, Canvas, CanvasTexture, Color, ImageData, Layer, Mat4, MeshId, PassSize, ShaderData, ShaderKind,
-    TextureFilter, TextureId, Vec3, Vec4, Vertex, Vertex2D, World,
+    Aabb, Assets, Batch, Canvas, CanvasTexture, Color, CubemapId, ImageData, Layer, Mat4, MeshId, PassSize, ShaderData,
+    ShaderKind, TextureFilter, TextureId, Vec3, Vec4, Vertex, Vertex2D, World,
 };
 use spark_core::material::BlendMode;
 use wgpu::util::DeviceExt;
@@ -69,6 +69,10 @@ struct FrameUniform {
     /// enabled, 1 / map size, normal offset, shadow distance
     shadow: [f32; 4],
     prev_view_proj: [[f32; 4]; 4],
+    sky_top: [f32; 4],
+    sky_bottom: [f32; 4],
+    /// enabled, cubemap blend, lighting strength, cubemap mip count
+    sky: [f32; 4],
 }
 
 const MAX_LIGHTS: usize = spark_core::Light::MAX_VISIBLE;
@@ -144,6 +148,12 @@ struct GpuMesh {
     vertex_count: usize,
     /// `Assets::mesh_version` when uploaded.
     version: u64,
+}
+
+/// Sky cubemap on the GPU (full mip chain: blurrier mips light rough surfaces).
+struct GpuCube {
+    view: wgpu::TextureView,
+    mips: u32,
 }
 
 struct GpuTexture {
@@ -273,6 +283,17 @@ pub struct Renderer {
     /// 1x1 map bound when shadows are off.
     shadow_dummy: ShadowMap,
     shadow: Option<ShadowMap>,
+    /// Trilinear sampler of sky cubemaps.
+    sky_sampler: wgpu::Sampler,
+    /// 1x1 white cube bound when the sky has no cubemap.
+    sky_dummy: GpuCube,
+    cubemaps: Vec<GpuCube>,
+    /// What `frame_bind_group` was built with: shadow map size (None = dummy), sky cubemap.
+    frame_group_key: (Option<u32>, Option<usize>),
+    sky_pipeline_layout: wgpu::PipelineLayout,
+    sky_shader: wgpu::ShaderModule,
+    /// Skybox pipelines per MSAA sample count.
+    sky_pipelines: HashMap<u32, wgpu::RenderPipeline>,
     shadow_buffer: wgpu::Buffer,
     shadow_bind_group: wgpu::BindGroup,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -674,6 +695,17 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: fs,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                sampler_entry(4, fs),
             ],
         );
         let object_layout = bind_group_layout(
@@ -727,7 +759,25 @@ impl Renderer {
             ..Default::default()
         });
         let shadow_dummy = shadow_map(&device, 1);
-        let frame_bind_group = frame_bind_group(&device, &frame_layout, &frame_buffer, &shadow_dummy.view, &shadow_sampler);
+        let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("spark sky sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let sky_dummy = upload_cube(&device, &queue, &std::array::from_fn(|_| ImageData::solid(Color::WHITE)));
+        let frame_bind_group =
+            frame_bind_group(&device, &frame_layout, &frame_buffer, &shadow_dummy.view, &shadow_sampler, &sky_dummy.view, &sky_sampler);
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("spark sky"),
+            bind_group_layouts: &[Some(&frame_layout)],
+            immediate_size: 0,
+        });
+        let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("spark sky"),
+            source: wgpu::ShaderSource::Wgsl(spark_core::shader::skybox_source().into()),
+        });
 
         // Per-object uniforms, read in 64-object windows (dynamic offsets) by instanced draws.
         let object_align = device.limits().min_uniform_buffer_offset_alignment as u64;
@@ -911,6 +961,13 @@ impl Renderer {
             shadow_sampler,
             shadow_dummy,
             shadow: None,
+            sky_sampler,
+            sky_dummy,
+            cubemaps: Vec::new(),
+            frame_group_key: (None, None),
+            sky_pipeline_layout,
+            sky_shader,
+            sky_pipelines: HashMap::new(),
             shadow_buffer,
             shadow_bind_group,
             shadow_pipeline,
@@ -988,6 +1045,7 @@ impl Renderer {
         if assets.generation() != self.assets_generation {
             self.meshes.clear();
             self.textures.clear();
+            self.cubemaps.clear();
             self.normal_mapped_groups.clear();
             self.shaders.clear();
             self.assets_generation = assets.generation();
@@ -1040,8 +1098,54 @@ impl Renderer {
             };
             self.textures.push(gpu);
         }
+        while self.cubemaps.len() < assets.cubemap_count() {
+            // loop condition guarantees cubemap id < assets.cubemap_count().
+            let faces = assets.cubemap(CubemapId(self.cubemaps.len() as u32)).expect("cubemap id in range");
+            let gpu = if faces[0].width > max {
+                log::error!("cubemap faces {0}x{0} are too big (max {1}); using white", faces[0].width, max);
+                upload_cube(&self.device, &self.queue, &std::array::from_fn(|_| ImageData::solid(Color::WHITE)))
+            } else {
+                upload_cube(&self.device, &self.queue, faces)
+            };
+            self.cubemaps.push(gpu);
+        }
     }
 
+
+    /// Skybox pipeline for the scene pass at `samples` MSAA (depth test off, no depth write).
+    fn ensure_sky_pipeline(&mut self, samples: u32) {
+        if self.sky_pipelines.contains_key(&samples) {
+            return;
+        }
+        let p = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("spark sky"),
+            layout: Some(&self.sky_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &self.sky_shader,
+                entry_point: Some("sky_vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: &self.sky_shader,
+                entry_point: Some("sky_fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(self.scene_format.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        self.sky_pipelines.insert(samples, p);
+    }
 
     fn ensure_scene_target(&mut self, size: (u32, u32), samples: u32) {
         let max = self.device.limits().max_texture_dimension_2d;
@@ -1287,13 +1391,26 @@ impl Renderer {
         let shadow_size = rs.shadow_size.clamp(256, max_dim.min(8192));
         let shadows = rs.shadows && si > 0.0 && rs.shadow_distance > 0.0;
         if shadows && self.shadow.as_ref().is_none_or(|m| m.size != shadow_size) {
-            let map = shadow_map(&self.device, shadow_size);
-            self.frame_bind_group = frame_bind_group(&self.device, &self.frame_layout, &self.frame_buffer, &map.view, &self.shadow_sampler);
-            self.shadow = Some(map);
-        } else if !shadows && self.shadow.is_some() {
+            self.shadow = Some(shadow_map(&self.device, shadow_size));
+        } else if !shadows {
             self.shadow = None;
-            self.frame_bind_group =
-                frame_bind_group(&self.device, &self.frame_layout, &self.frame_buffer, &self.shadow_dummy.view, &self.shadow_sampler);
+        }
+        let sky = scene.sky;
+        let sky_cube = sky.and_then(|s| s.cubemap).map(|c| c.0 as usize).filter(|&c| c < self.cubemaps.len());
+        let key = (self.shadow.as_ref().map(|m| m.size), sky_cube);
+        if key != self.frame_group_key {
+            let shadow_view = self.shadow.as_ref().map_or(&self.shadow_dummy.view, |m| &m.view);
+            let sky_view = sky_cube.map_or(&self.sky_dummy.view, |c| &self.cubemaps[c].view);
+            self.frame_bind_group = frame_bind_group(
+                &self.device,
+                &self.frame_layout,
+                &self.frame_buffer,
+                shadow_view,
+                &self.shadow_sampler,
+                sky_view,
+                &self.sky_sampler,
+            );
+            self.frame_group_key = key;
         }
         let light_vp = if shadows { sun_view_proj(cam, scene.sun.direction, rs.shadow_distance, shadow_size) } else { Mat4::IDENTITY };
         let texel_world = rs.shadow_distance / shadow_size as f32;
@@ -1323,6 +1440,17 @@ impl Renderer {
             shadow_view_proj: light_vp.to_cols_array_2d(),
             shadow: [flag(shadows), 1.0 / shadow_size as f32, texel_world * 1.5, rs.shadow_distance],
             prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
+            sky_top: sky.map_or([0.0; 4], |s| s.top.to_linear()),
+            sky_bottom: sky.map_or([0.0; 4], |s| s.bottom.to_linear()),
+            sky: match sky {
+                Some(s) => [
+                    1.0,
+                    if sky_cube.is_some() && s.blend > 0.0 { s.blend.min(1.0) } else { 0.0 }, // NaN -> 0
+                    s.lighting.max(0.0),
+                    sky_cube.map_or(1, |c| self.cubemaps[c].mips) as f32,
+                ],
+                None => [0.0; 4],
+            },
         };
         self.queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
         if shadows {
@@ -1529,6 +1657,9 @@ impl Renderer {
             }
         }
 
+        if sky.is_some() {
+            self.ensure_sky_pipeline(samples);
+        }
         let target = self.scene_target.as_ref().expect("scene target"); // ensure_scene_target() was called
         let bg = scene.background.to_linear();
         {
@@ -1557,6 +1688,10 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            if sky.is_some() {
+                pass.set_pipeline(&self.sky_pipelines[&samples]); // ensure_sky_pipeline() above
+                pass.draw(0..3, 0..1);
+            }
             let (mut last_pipe, mut last_shader, mut last_mesh, mut last_texture) =
                 (None, None, usize::MAX, None::<(Option<usize>, Option<usize>)>);
             for b in &batches {
@@ -2129,6 +2264,8 @@ fn frame_bind_group(
     buffer: &wgpu::Buffer,
     shadow: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
+    sky: &wgpu::TextureView,
+    sky_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("spark frame"),
@@ -2137,8 +2274,42 @@ fn frame_bind_group(
             wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(shadow) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(sky) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(sky_sampler) },
         ],
     })
+}
+
+/// Uploads six square faces (+X, -X, +Y, -Y, +Z, -Z) with a full mip chain each.
+fn upload_cube(device: &wgpu::Device, queue: &wgpu::Queue, faces: &[ImageData; 6]) -> GpuCube {
+    let size = faces[0].width;
+    let mut mips = 1;
+    let mut data = Vec::new();
+    for face in faces {
+        let (levels, bytes) = build_mips(face);
+        mips = levels;
+        data.extend_from_slice(&bytes);
+    }
+    let texture = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: Some("spark sky cubemap"),
+            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 6 },
+            mip_level_count: mips,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        &data,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::Cube),
+        ..Default::default()
+    });
+    GpuCube { view, mips }
 }
 
 /// Orthographic sun view around the camera, snapped to shadow texels so edges don't shimmer.
@@ -2492,6 +2663,65 @@ mod tests {
         let image = r.screenshot(&world).expect("screenshot");
         assert!(image.pixel(32, 32)[0] > 200, "LOD mesh drawn");
         assert!(image.pixel(20, 32)[0] < 30, "LOD mesh replaces the full mesh: {:?}", image.pixel(20, 32));
+    }
+
+    /// Gradient sky: up shows `top`, down shows `bottom`; with a cubemap the face in view shows.
+    #[test]
+    fn sky_gradient_and_cubemap() {
+        use spark_core::{ImageData, Sky};
+        let Ok(mut r) = Renderer::new_headless(32, 32) else { return eprintln!("skipping GPU test: no adapter") };
+        let mut world = World::default();
+        world.scene.background = Color::BLACK;
+        world.scene.sky = Some(Sky::gradient(Color::rgb(0.0, 0.0, 1.0), Color::rgb(0.0, 1.0, 0.0)));
+        world.scene.camera.position = Vec3::ZERO;
+        world.scene.camera.look_at(Vec3::new(0.0, 10.0, -0.01)); // straight up
+        let up = r.screenshot(&world).expect("screenshot").pixel(16, 16);
+        world.scene.camera.look_at(Vec3::new(0.0, -10.0, -0.01)); // straight down
+        let down = r.screenshot(&world).expect("screenshot").pixel(16, 16);
+        assert!(up[2] > 200 && up[1] < 60, "up = {up:?}");
+        assert!(down[1] > 200 && down[2] < 60, "down = {down:?}");
+
+        // Faces: +X red, -X black, +Y black, -Y black, +Z black, -Z white (the camera looks along -Z).
+        let colors = [Color::rgb(1.0, 0.0, 0.0), Color::BLACK, Color::BLACK, Color::BLACK, Color::BLACK, Color::WHITE];
+        let cube = world.assets.add_cubemap(colors.map(|c| ImageData::new(4, 4, c.to_rgba8().repeat(16)))).unwrap();
+        world.scene.sky = Some(Sky::cubemap(cube));
+        let scope = r.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        for samples in [4, 1] {
+            world.render.msaa = samples;
+            world.scene.camera.look_at(Vec3::new(0.0, 0.0, -10.0));
+            let fwd = r.screenshot(&world).expect("screenshot").pixel(16, 16);
+            assert!(fwd.iter().take(3).all(|&c| c > 200), "-Z face: {fwd:?}");
+            world.scene.camera.look_at(Vec3::new(10.0, 0.0, 0.0));
+            let right = r.screenshot(&world).expect("screenshot").pixel(16, 16);
+            assert!(right[0] > 200 && right[1] < 60, "+X face: {right:?}");
+        }
+        let error = pollster::block_on(scope.pop());
+        assert!(error.is_none(), "GPU validation error: {error:?}");
+    }
+
+    /// Sky lighting: in a scene with no ambient color and no sun, a white diffuse cube is lit by
+    /// the sky only when `lighting` is above 0, and a metal reflects the sky.
+    #[test]
+    fn sky_lights_the_scene() {
+        use spark_core::Sky;
+        let Ok(mut r) = Renderer::new_headless(32, 32) else { return eprintln!("skipping GPU test: no adapter") };
+        let mut world = World::default();
+        world.scene.ambient = Color::BLACK;
+        world.scene.sun.intensity = 0.0;
+        let cube = world.add_mesh(MeshData::cube(2.0));
+        let id = world.spawn(cube, Material::color(Color::WHITE));
+        world.scene.camera.position = Vec3::new(0.0, 0.0, 4.0);
+        world.scene.camera.look_at(Vec3::ZERO);
+        let sky = Sky::gradient(Color::rgb(0.8, 0.8, 0.8), Color::rgb(0.8, 0.8, 0.8));
+        world.scene.sky = Some(sky);
+        let dark = r.screenshot(&world).expect("screenshot").pixel(16, 16);
+        assert!(dark[0] < 20, "lighting 0 keeps the flat (black) ambient: {dark:?}");
+        world.scene.sky = Some(sky.with_lighting(1.0));
+        let lit = r.screenshot(&world).expect("screenshot").pixel(16, 16);
+        assert!(lit[0] > 150, "sky lights the cube: {lit:?}");
+        world.scene.get_mut(id).unwrap().material = Material::pbr(Color::WHITE, 1.0, 0.1);
+        let metal = r.screenshot(&world).expect("screenshot").pixel(16, 16);
+        assert!(metal[0] > 150, "metal reflects the sky: {metal:?}");
     }
 
     /// Values above 1 reach the tonemapper: Reinhard x / (1 + x) stays above 0.5 (sRGB 188) only

@@ -397,6 +397,15 @@ fn install_scene(lua: &Lua, g: &Table) -> LuaResult<()> {
             with(lua, |w| Ok(w.scene.fog = fog))
         })?,
     )?;
+    g.set(
+        "sky",
+        lua.create_function(|lua, v: Value| {
+            with(lua, |w| {
+                let sky = to_sky(w, &v)?;
+                Ok(w.scene.sky = sky)
+            })
+        })?,
+    )?;
     g.set("dump_scene", lua.create_function(|lua, ()| with(lua, |w| Ok(w.scene.dump())))?)?;
     g.set("quit", lua.create_function(|lua, ()| with(lua, |w| Ok(w.quit())))?)?;
     g.set("time", lua.create_userdata(TimeRef)?)?;
@@ -470,4 +479,40 @@ pub(crate) fn install(lua: &Lua) -> LuaResult<()> {
     crate::ui_api::install(lua)?;
     g.set("window", lua.create_userdata(LuaWindow)?)?;
     Ok(())
+}
+
+/// `sky(nil | false | true | { top, bottom, cubemap, blend, lighting })`.
+fn to_sky(w: &mut World, v: &Value) -> LuaResult<Option<spark_core::Sky>> {
+    const KEYS: &str = "top, bottom, cubemap, blend, lighting";
+    let t = match v {
+        Value::Nil | Value::Boolean(false) => return Ok(None),
+        Value::Boolean(true) => return Ok(Some(spark_core::Sky::default())),
+        Value::Table(t) => t,
+        _ => return Err(rt(format!("sky: expected a table {{ {KEYS} }}, true or nil, got {}", v.type_name()))),
+    };
+    let mut sky = spark_core::Sky::default();
+    for pair in t.pairs::<String, Value>() {
+        let (k, x) = pair?;
+        let what = format!("sky.{k}");
+        match k.as_str() {
+            "top" => sky.top = to_color(&x, &what)?,
+            "bottom" => sky.bottom = to_color(&x, &what)?,
+            "cubemap" => {
+                sky.cubemap = match &x {
+                    Value::Nil | Value::Boolean(false) => None,
+                    Value::String(path) => {
+                        Some(w.assets.load_cubemap(&path.to_string_lossy()).map_err(|e| rt(format!("{what}: {e}")))?)
+                    }
+                    _ => return Err(rt(format!("{what}: expected an image path (a 6:1 strip of +X -X +Y -Y +Z -Z faces)"))),
+                }
+            }
+            "blend" => {
+                let b = to_num(&x, &what)?;
+                sky.blend = if b.is_nan() { 1.0 } else { b.clamp(0.0, 1.0) };
+            }
+            "lighting" => sky.lighting = to_num(&x, &what)?.max(0.0),
+            _ => return Err(rt(format!("sky: unknown option '{k}' (allowed: {KEYS})"))),
+        }
+    }
+    Ok(Some(sky))
 }
