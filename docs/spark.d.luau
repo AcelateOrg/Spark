@@ -520,6 +520,19 @@ declare draw: {
     spark_badge: (opts: { align: Align?, margin: number?, width: number?, alpha: number?, x: number?, y: number? }?) -> (boolean, boolean),
 }
 
+type WidgetId = string | number
+
+declare ui: {
+    button: (id: WidgetId, x: number, y: number, w: number, h: number, text: string) -> boolean,
+    slider: (id: WidgetId, x: number, y: number, w: number, h: number, value: number, min: number?, max: number?) -> number,
+    checkbox: (id: WidgetId, x: number, y: number, size: number, checked: boolean) -> boolean,
+    panel: (x: number, y: number, w: number, h: number, color: ColorLike?, border: ColorLike?) -> boolean,
+    label: (x: number, y: number, text: string, size: number?, color: ColorLike?) -> (),
+    image: (x: number, y: number, w: number, h: number, texture: Texture | string) -> (),
+    progress: (x: number, y: number, w: number, h: number, t: number, color: ColorLike?) -> (),
+    hovered: () -> boolean,
+}
+
 declare screen: {
     width: number,
     height: number,

@@ -29,6 +29,7 @@ pub mod schedule;
 pub mod shader;
 pub mod text;
 pub mod time;
+pub mod ui;
 pub mod vfs;
 pub mod world;
 
@@ -56,6 +57,7 @@ pub use scene::{Fog, Light, LightKind, Object, ObjectId, Scene, Sun};
 pub use schedule::{Scheduler, TimerId};
 pub use shader::{Param, ParamType, ShaderData, ShaderId, ShaderKind};
 pub use text::{FontId, Fonts};
+pub use ui::{Rect, Ui, UiStyle};
 pub use time::Time;
 pub use world::{WindowSettings, World};
 

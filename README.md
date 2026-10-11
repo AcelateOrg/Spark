@@ -56,7 +56,7 @@ Spark does not try to compete with Unity, Unreal or Godot. It has a different jo
 | Module | What you get |
 |---|---|
 | **Render** | wgpu (Vulkan / DirectX 12 / Metal / OpenGL fallback). 3D meshes and primitives, glTF 2.0 models with skins and animations, sun / point / spot lights, fog, HDR scene, built-in post effects (bloom, tonemapping, SSAO, depth of field, motion blur, color grading, FXAA, vignette, film grain, chromatic aberration; all off by default), your own WGSL surface and full-screen post shaders with hot reload ([docs/SHADERS.md](docs/SHADERS.md)), low internal resolution for weak PCs |
-| **2D** | immediate-mode drawing: sprites and sprite sheets, text with any TTF/OTF font, shapes, transforms, UI and in-scene layers |
+| **2D** | immediate-mode drawing: sprites and sprite sheets, text with any TTF/OTF font, shapes, transforms, UI and in-scene layers, immediate-mode UI widgets (buttons, sliders, checkboxes, panels, progress bars) |
 | **Script** | Luau runtime with hot reload, modules (`require`), timers, coroutine tasks with `wait`, tweens |
 | **Input** | full keyboard (punctuation, numpad, F1-F24), text input with IME, key repeat, mouse with side buttons and FPS mouse lock, gamepads with hot-plug |
 | **Audio** | wav / ogg / mp3 / flac, 3D positional sound, fades, mixer buses (music / sfx / ui ...), layered music |

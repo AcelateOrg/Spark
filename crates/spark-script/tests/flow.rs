@@ -84,3 +84,8 @@ fn debug_contract() {
 fn postfx_contract() {
     run_script("postfx.luau", 10);
 }
+
+#[test]
+fn ui_contract() {
+    run_script("ui.luau", 10);
+}
