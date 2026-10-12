@@ -66,7 +66,7 @@ enum Grab {
     /// it may still be the jump of the first warp).
     Look { anchor: Pos2, last: Option<Pos2> },
     /// The game asked for `input.lock_mouse` (first-person look); kept at the panel center.
-    Game { last: Option<Pos2> },
+    Game { anchor: Pos2, last: Option<Pos2> },
 }
 
 /// The editor camera.
@@ -119,6 +119,8 @@ pub struct Viewport {
     cam: FlyCam,
     grab: Grab,
     cursor_hidden: bool,
+    /// Screen position the cursor is pinned to (Windows).
+    os_anchor: Option<(i32, i32)>,
     focused: bool,
     focus_next: bool,
     mute: bool,
@@ -144,6 +146,7 @@ impl Viewport {
             cam: FlyCam::default(),
             grab: Grab::None,
             cursor_hidden: false,
+            os_anchor: None,
             focused: false,
             focus_next: false,
             mute: false,
@@ -355,6 +358,10 @@ impl Viewport {
                 egui::CursorGrab::None
             }));
         }
+        if std::mem::discriminant(&grab) != std::mem::discriminant(&self.grab) {
+            // New pin: the OS anchor is taken on the next motion read.
+            self.os_anchor = None;
+        }
         self.grab = grab;
     }
 
@@ -429,6 +436,10 @@ impl Viewport {
             self.fly(ui, &response, rect, dt, pointer_moved);
         }
 
+        // egui sets the cursor icon (and visibility) every frame: keep it hidden while grabbed.
+        if self.grab != Grab::None {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
         self.render();
         if let Some(target) = &self.target {
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
@@ -596,28 +607,44 @@ impl Viewport {
         }
     }
 
+    /// Mouse motion (physical pixels) while the cursor is pinned, and puts it back. Windows: reads
+    /// and resets the OS cursor itself (exact; eframe forwards no raw motion and warping through
+    /// winit events lags / loses moves). Elsewhere: egui pointer events + warp.
+    fn pinned_motion(&mut self, ctx: &egui::Context, pointer_moved: Option<Pos2>) -> egui::Vec2 {
+        if let Some(now) = crate::os::cursor_pos() {
+            let anchor = *self.os_anchor.get_or_insert(now);
+            if now != anchor {
+                crate::os::set_cursor_pos(anchor);
+            }
+            return egui::vec2((now.0 - anchor.0) as f32, (now.1 - anchor.1) as f32);
+        }
+        let (Grab::Look { anchor, last } | Grab::Game { anchor, last }) = &mut self.grab else { return egui::Vec2::ZERO };
+        let Some(p) = pointer_moved else { return egui::Vec2::ZERO };
+        let d = last.map_or(egui::Vec2::ZERO, |l| (p - l) * ctx.pixels_per_point());
+        if p != *anchor {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorPosition(*anchor));
+        }
+        *last = Some(*anchor);
+        d
+    }
+
     /// Hides and pins the cursor while the game wants raw mouse look; the motion becomes `mouse_delta`.
     fn game_cursor(&mut self, ctx: &egui::Context, rect: Rect, pointer_moved: Option<Pos2>) {
         let want = self.focused && self.session.as_ref().is_some_and(|s| s.world.input.lock_mouse);
-        let center = rect.center();
         match (want, self.grab) {
-            (true, Grab::Game { last }) => {
-                if let Some(p) = pointer_moved {
-                    if let Some(last) = last {
-                        let d = (p - last) * ctx.pixels_per_point();
-                        if let Some(s) = &mut self.session {
-                            s.world.input.mouse_motion(Vec2::new(d.x, d.y));
-                        }
+            (true, Grab::Game { .. }) => {
+                let d = self.pinned_motion(ctx, pointer_moved);
+                if d != egui::Vec2::ZERO {
+                    if let Some(s) = &mut self.session {
+                        s.world.input.mouse_motion(Vec2::new(d.x, d.y));
                     }
-                    if p != center {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::CursorPosition(center));
-                    }
-                    self.grab = Grab::Game { last: Some(center) };
                 }
             }
             (true, _) => {
-                self.set_cursor(ctx, Grab::Game { last: None });
+                // Pin at the panel center (the first motion only takes the cursor there).
+                let center = rect.center();
                 ctx.send_viewport_cmd(egui::ViewportCommand::CursorPosition(center));
+                self.set_cursor(ctx, Grab::Game { anchor: center, last: None });
             }
             (false, Grab::Game { .. }) => self.set_cursor(ctx, Grab::None),
             (false, _) => {}
@@ -661,19 +688,11 @@ impl Viewport {
                 }
             }
             Grab::Look { .. } if !rmb_down => self.set_cursor(&ctx, Grab::None),
-            Grab::Look { anchor, last } => {
-                if let Some(p) = pointer_moved {
-                    if let Some(last) = last {
-                        let d = p - last;
-                        let sens = 0.0045;
-                        self.cam.yaw -= d.x * sens;
-                        self.cam.pitch = (self.cam.pitch - d.y * sens).clamp(-1.55, 1.55);
-                    }
-                    if p != anchor {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::CursorPosition(anchor));
-                    }
-                    self.grab = Grab::Look { anchor, last: Some(anchor) };
-                }
+            Grab::Look { .. } => {
+                let d = self.pinned_motion(&ctx, pointer_moved);
+                let sens = 0.0036;
+                self.cam.yaw -= d.x * sens;
+                self.cam.pitch = (self.cam.pitch - d.y * sens).clamp(-1.55, 1.55);
             }
             _ => {}
         }

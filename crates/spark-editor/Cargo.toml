@@ -36,3 +36,7 @@ serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Viewport mouse look: read / pin the OS cursor directly (eframe does not forward raw mouse motion).
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
