@@ -21,7 +21,9 @@ gui = []
 [dependencies]
 spark-project.workspace = true
 spark-devtools.workspace = true
-# Same wgpu (30) / winit (0.30) as the engine: a game viewport inside the editor can share the GPU device later.
+# The viewport panel runs the game in-process and draws it on egui's GPU device.
+engine = { package = "spark", path = "../spark" }
+# Same wgpu (30) / winit (0.30) as the engine: the viewport shares egui's GPU device (zero-copy).
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
 egui_dock = "0.21"
 rfd = "0.17"

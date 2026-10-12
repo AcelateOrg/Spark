@@ -4042,6 +4042,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "spark",
  "spark-devtools",
  "spark-project",
  "sys-locale",

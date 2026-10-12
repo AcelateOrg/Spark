@@ -43,6 +43,7 @@ pub mod icon {
     pub const ERROR: &str = "❌";
     pub const BUG: &str = "🐞";
     pub const SCENE: &str = "🌳";
+    pub const VIEWPORT: &str = "🎮";
     pub const CONSOLE: &str = "🖵";
     pub const DOT: &str = "•";
     pub const MENU: &str = "⋯";

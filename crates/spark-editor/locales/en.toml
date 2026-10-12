@@ -124,6 +124,23 @@ console = "Console"
 problems = "Problems"
 debug = "Debug"
 scene = "Scene"
+viewport = "Viewport"
+
+[viewport]
+play = "Play"
+play_hint = "Run the game right in this panel"
+stop = "Stop"
+reload_hint = "Rebuild the scene from scratch"
+camera_reset = "Move the editor camera to the game camera"
+sound_hint = "Game sound in the panel"
+mode_edit = "Edit"
+mode_play = "Playing"
+mode_pause = "Paused"
+speed = "camera {speed} m/s"
+hint = "RMB + mouse: look · WASD/QE: fly · Shift: faster · wheel: forward/speed · MMB: pan"
+click_to_play = "Click to control the game"
+no_gpu = "The viewport is unavailable: the editor runs without the wgpu renderer."
+help = "Edit mode: the scene after start(), the game is frozen.\nHold RMB + mouse to look around, WASD to fly, Q/E down/up, Shift faster, wheel with RMB changes speed, wheel moves forward/back, MMB pans.\n\nPlay (Ctrl+P) runs the game in the panel with keyboard and mouse. Stop resets the scene.\nEsc frees a captured mouse. Pause (Ctrl+Shift+P) lets you fly around with the editor camera.\nSaved files apply right away."
 
 [start]
 title = "Ready to play"

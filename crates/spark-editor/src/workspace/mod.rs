@@ -9,6 +9,7 @@ mod documents;
 mod explorer;
 mod game;
 mod problems;
+mod viewport;
 mod watcher;
 
 use std::path::{Path, PathBuf};
@@ -31,6 +32,7 @@ use documents::{Documents, EditorEvent};
 use explorer::Explorer;
 use game::{GameSession, GameState, SessionEvent};
 use problems::Problems;
+use viewport::{Viewport, ViewportEvent};
 use watcher::Watcher;
 
 /// Every command of the workspace.
@@ -77,6 +79,8 @@ pub enum Tab {
     Problems,
     Debug,
     Scene,
+    /// The game drawn inside the editor: fly camera + Play mode.
+    Viewport,
 }
 
 enum Dialog {
@@ -100,6 +104,7 @@ pub struct Workspace {
     console: Console,
     problems: Problems,
     game: GameSession,
+    viewport: Viewport,
     watcher: Option<Watcher>,
     dialog: Option<Dialog>,
     focus_dialog: bool,
@@ -113,7 +118,8 @@ fn default_layout() -> DockState<Tab> {
     let tree = dock.main_surface_mut();
     let [center, _explorer] = tree.split_left(NodeIndex::root(), 0.18, vec![Tab::Explorer]);
     let [center, _debug] = tree.split_right(center, 0.74, vec![Tab::Debug, Tab::Scene]);
-    let [_code, _bottom] = tree.split_below(center, 0.70, vec![Tab::Console, Tab::Problems]);
+    let [center, _bottom] = tree.split_below(center, 0.70, vec![Tab::Console, Tab::Problems]);
+    let [_code, _view] = tree.split_right(center, 0.45, vec![Tab::Viewport]);
     dock
 }
 
@@ -122,6 +128,7 @@ impl Workspace {
         let mut ws = Self {
             explorer: Explorer::new(&project.root, &project.title),
             game: GameSession::new(&project.root),
+            viewport: Viewport::new(&project.entry),
             dock: default_layout(),
             dock_lang: None,
             docs: Documents::default(),
@@ -193,8 +200,15 @@ impl Workspace {
 
     // ------------------------------------------------------------------ frame
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings, toasts: &mut Toasts) -> Option<AppAction> {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        gpu: Option<&eframe::egui_wgpu::RenderState>,
+        settings: &mut Settings,
+        toasts: &mut Toasts,
+    ) -> Option<AppAction> {
         let ctx = ui.ctx().clone();
+        self.viewport.set_gpu(gpu);
         if !self.watcher_started {
             self.watcher_started = true;
             match Watcher::new(&self.project.root, &ctx) {
@@ -264,8 +278,21 @@ impl Workspace {
             }
         }
 
+        self.console.extend(self.viewport.take_log(&self.clock));
+        for e in self.viewport.take_events() {
+            match e {
+                ViewportEvent::Error(msg) => {
+                    self.problems.set_runtime(msg.as_deref());
+                    if msg.is_some() {
+                        toasts.error(t("game.script_error"));
+                    }
+                }
+            }
+        }
+
         let changes = self.watcher.as_ref().map(Watcher::changes).unwrap_or_default();
         if !changes.is_empty() {
+            self.viewport.files_changed(&changes);
             self.explorer.invalidate();
             for doc in self.docs.iter_mut() {
                 if changes.contains(&doc.path) && !doc.on_disk_change() {
@@ -292,7 +319,8 @@ impl Workspace {
             (KeyboardShortcut::new(none, Key::F8), Action::Check),
             (KeyboardShortcut::new(ctrl, Key::Comma), Action::Settings),
         ];
-        if self.dialog.is_some() {
+        // A dialog is open, or the game in the viewport has the keyboard (F5 is its key then).
+        if self.dialog.is_some() || self.viewport.wants_keyboard() {
             return;
         }
         ui.input_mut(|i| {
@@ -399,6 +427,7 @@ impl Workspace {
                     (Tab::Problems, t("tab.problems")),
                     (Tab::Debug, t("tab.debug")),
                     (Tab::Scene, t("tab.scene")),
+                    (Tab::Viewport, t("tab.viewport")),
                 ] {
                     if item(ui, label, "", true) {
                         actions.push(Action::ShowTab(tab));
@@ -541,6 +570,7 @@ impl Workspace {
             console: &mut self.console,
             problems: &mut self.problems,
             game: &mut self.game,
+            viewport: &mut self.viewport,
             settings,
             actions,
         };
@@ -987,6 +1017,7 @@ struct Viewer<'a> {
     console: &'a mut Console,
     problems: &'a mut Problems,
     game: &'a mut GameSession,
+    viewport: &'a mut Viewport,
     settings: &'a Settings,
     actions: &'a mut Vec<Action>,
 }
@@ -1027,6 +1058,7 @@ impl TabViewer for Viewer<'_> {
             }
             Tab::Debug => format!("{} {}", icon::BUG, t("tab.debug")).into(),
             Tab::Scene => format!("{} {}", icon::SCENE, t("tab.scene")).into(),
+            Tab::Viewport => format!("{} {}", icon::VIEWPORT, t("tab.viewport")).into(),
         }
     }
 
@@ -1050,6 +1082,7 @@ impl TabViewer for Viewer<'_> {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.game.debug_ui(ui, self.actions));
             }
             Tab::Scene => self.game.scene_ui(ui),
+            Tab::Viewport => self.viewport.ui(ui),
         }
     }
 
@@ -1191,7 +1224,7 @@ mod tests {
     #[test]
     fn default_layout_has_every_panel() {
         let dock = default_layout();
-        for tab in [Tab::Start, Tab::Explorer, Tab::Console, Tab::Problems, Tab::Debug, Tab::Scene] {
+        for tab in [Tab::Start, Tab::Explorer, Tab::Console, Tab::Problems, Tab::Debug, Tab::Scene, Tab::Viewport] {
             assert!(dock.find_tab(&tab).is_some(), "{tab:?}");
         }
     }

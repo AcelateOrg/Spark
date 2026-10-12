@@ -172,11 +172,11 @@ impl EditorApp {
 }
 
 impl eframe::App for EditorApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let action = match &mut self.screen {
             Screen::Welcome(w) => w.ui(ui, &mut self.settings),
-            Screen::Workspace(ws) => ws.ui(ui, &mut self.settings, &mut self.toasts),
+            Screen::Workspace(ws) => ws.ui(ui, frame.wgpu_render_state(), &mut self.settings, &mut self.toasts),
         };
         match action {
             Some(AppAction::OpenProject(p)) => self.open_project(&p),

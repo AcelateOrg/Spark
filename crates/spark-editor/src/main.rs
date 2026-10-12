@@ -9,16 +9,20 @@
 //!
 //! - [`app`]        screens (welcome / workspace), settings, global window state
 //! - [`welcome`]    project manager: recent projects, new project, open, settings
-//! - [`workspace`]  an open game: dockable panels (explorer, code editor, console, problems, debugger, scene)
+//! - [`workspace`]  an open game: dockable panels (explorer, code editor, console, problems, debugger, scene,
+//!                  viewport)
+//! - [`logcap`]     the logger; copies engine messages of the in-editor game to the console
 //! - [`process`]    child processes: the game (`spark --devtools`), `spark check`, `spark build`
 //! - devtools       the live link to the running game (crate `spark-devtools`)
 //! - [`i18n`]       every UI string, `locales/*.toml`
 //!
-//! The editor never links the engine: games always run in their own process, exactly as players get them.
+//! Run (F5) starts the game in its own process, exactly as players get it. The viewport panel also
+//! links the engine: it draws the game on the editor's GPU device (fly camera, Play mode in the panel).
 #![cfg_attr(all(feature = "gui", windows), windows_subsystem = "windows")]
 
 mod app;
 mod i18n;
+mod logcap;
 mod os;
 mod process;
 mod settings;
@@ -35,8 +39,7 @@ use eframe::egui;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> eframe::Result {
-    let env = env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=error,naga=warn,egui_wgpu=warn");
-    let _ = env_logger::Builder::from_env(env).format_timestamp(None).try_init();
+    logcap::init("info,wgpu_core=warn,wgpu_hal=error,naga=warn,egui_wgpu=warn");
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
