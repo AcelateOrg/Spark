@@ -4,6 +4,7 @@
 //! Panels never act directly: they push [`Action`]s, the workspace applies them after drawing. That keeps
 //! borrowing simple and gives one place for every command (menu, shortcut, button, context menu).
 
+mod assets;
 mod console;
 mod documents;
 mod explorer;
@@ -27,6 +28,7 @@ use crate::settings::Settings;
 use crate::theme::{self, icon};
 use crate::toasts::Toasts;
 
+use assets::AssetPreviews;
 use console::Console;
 use documents::{Documents, EditorEvent};
 use explorer::Explorer;
@@ -39,6 +41,8 @@ use watcher::Watcher;
 #[derive(Clone, Debug)]
 pub enum Action {
     OpenFile(PathBuf),
+    /// Open in the code editor even if the file has a preview (`.gltf`).
+    OpenText(PathBuf),
     /// Open and go to a line; relative paths are relative to the project.
     OpenAt(PathBuf, u32),
     Save(PathBuf),
@@ -75,6 +79,8 @@ pub enum Tab {
     Start,
     Explorer,
     Doc(PathBuf),
+    /// Preview of an image, sound or model.
+    Asset(PathBuf),
     Console,
     Problems,
     Debug,
@@ -105,6 +111,7 @@ pub struct Workspace {
     problems: Problems,
     game: GameSession,
     viewport: Viewport,
+    assets: AssetPreviews,
     watcher: Option<Watcher>,
     dialog: Option<Dialog>,
     focus_dialog: bool,
@@ -129,6 +136,7 @@ impl Workspace {
             explorer: Explorer::new(&project.root, &project.title),
             game: GameSession::new(&project.root),
             viewport: Viewport::new(&project.entry),
+            assets: AssetPreviews::default(),
             dock: default_layout(),
             dock_lang: None,
             docs: Documents::default(),
@@ -190,7 +198,7 @@ impl Workspace {
             .dock
             .iter_all_tabs()
             .filter_map(|(_, tab)| match tab {
-                Tab::Doc(p) => rel(p),
+                Tab::Doc(p) | Tab::Asset(p) => rel(p),
                 _ => None,
             })
             .collect();
@@ -209,6 +217,7 @@ impl Workspace {
     ) -> Option<AppAction> {
         let ctx = ui.ctx().clone();
         self.viewport.set_gpu(gpu);
+        self.assets.set_gpu(gpu);
         if !self.watcher_started {
             self.watcher_started = true;
             match Watcher::new(&self.project.root, &ctx) {
@@ -293,6 +302,7 @@ impl Workspace {
         let changes = self.watcher.as_ref().map(Watcher::changes).unwrap_or_default();
         if !changes.is_empty() {
             self.viewport.files_changed(&changes);
+            self.assets.files_changed(&changes);
             self.explorer.invalidate();
             for doc in self.docs.iter_mut() {
                 if changes.contains(&doc.path) && !doc.on_disk_change() {
@@ -571,6 +581,7 @@ impl Workspace {
             problems: &mut self.problems,
             game: &mut self.game,
             viewport: &mut self.viewport,
+            assets: &mut self.assets,
             settings,
             actions,
         };
@@ -657,8 +668,9 @@ impl Workspace {
                             match std::fs::rename(&*path, &target) {
                                 Ok(()) => {
                                     self.docs.rename(path, &target);
+                                    self.assets.rename(path, &target);
                                     for (_, tab) in self.dock.iter_all_tabs_mut() {
-                                        if let Tab::Doc(p) = tab {
+                                        if let Tab::Doc(p) | Tab::Asset(p) = tab {
                                             *p = moved(p, path, &target);
                                         }
                                     }
@@ -684,7 +696,11 @@ impl Workspace {
                     if ok {
                         match trash::delete(&*path) {
                             Ok(()) => {
-                                let gone: Vec<PathBuf> = self.docs.iter().map(|d| d.path.clone()).filter(|p| p.starts_with(&*path)).collect();
+                                let mut gone: Vec<PathBuf> = self.docs.iter().map(|d| d.path.clone()).filter(|p| p.starts_with(&*path)).collect();
+                                gone.extend(self.dock.iter_all_tabs().filter_map(|(_, t)| match t {
+                                    Tab::Asset(p) if p.starts_with(&*path) => Some(p.clone()),
+                                    _ => None,
+                                }));
                                 for p in gone {
                                     actions.push(Action::ForceClose(p));
                                 }
@@ -773,6 +789,7 @@ impl Workspace {
     fn handle(&mut self, action: Action, settings: &mut Settings, toasts: &mut Toasts) -> Option<AppAction> {
         match action {
             Action::OpenFile(path) => self.open_file(&path, None, toasts),
+            Action::OpenText(path) => self.open_doc(&path, None, toasts),
             Action::OpenAt(path, line) => {
                 let path = self.resolve(&path);
                 self.explorer.reveal(&path);
@@ -791,7 +808,10 @@ impl Workspace {
                 }
             }
             Action::CloseActive => {
-                if let Some(p) = self.active_doc.clone() {
+                if let Some((_, Tab::Asset(p))) = self.dock.find_active_focused() {
+                    let p = p.clone();
+                    self.close_doc(&p);
+                } else if let Some(p) = self.active_doc.clone() {
                     if self.docs.get(&p).is_some_and(|d| d.is_dirty()) {
                         self.open_dialog(Dialog::CloseUnsaved { path: p });
                     } else {
@@ -836,11 +856,11 @@ impl Workspace {
             }
             Action::ShowTab(tab) => self.show_tab(tab),
             Action::ResetLayout => {
-                let open: Vec<PathBuf> = self.dock.iter_all_tabs().filter_map(|(_, t)| if let Tab::Doc(p) = t { Some(p.clone()) } else { None }).collect();
+                let open: Vec<Tab> = self.dock.iter_all_tabs().filter(|(_, t)| matches!(t, Tab::Doc(_) | Tab::Asset(_))).map(|(_, t)| t.clone()).collect();
                 self.dock = default_layout();
                 self.dock_lang = None;
-                for p in open {
-                    self.add_doc_tab(p);
+                for tab in open {
+                    self.add_code_tab(tab);
                 }
             }
             Action::Settings => self.open_dialog(Dialog::Settings),
@@ -871,6 +891,15 @@ impl Workspace {
     }
 
     fn open_file(&mut self, path: &Path, line: Option<u32>, toasts: &mut Toasts) {
+        if line.is_none() && assets::kind(path).is_some() {
+            self.assets.open(path);
+            self.add_code_tab(Tab::Asset(path.to_path_buf()));
+            return;
+        }
+        self.open_doc(path, line, toasts);
+    }
+
+    fn open_doc(&mut self, path: &Path, line: Option<u32>, toasts: &mut Toasts) {
         if !explorer::is_text_file(path) {
             crate::os::open_path(path);
             return;
@@ -886,13 +915,12 @@ impl Workspace {
                 return;
             }
         }
-        self.add_doc_tab(path.to_path_buf());
+        self.add_code_tab(Tab::Doc(path.to_path_buf()));
         self.active_doc = Some(path.to_path_buf());
     }
 
-    /// Focuses the document's tab, or adds it next to the other code tabs.
-    fn add_doc_tab(&mut self, path: PathBuf) {
-        let tab = Tab::Doc(path);
+    /// Focuses a document / preview tab, or adds it next to the other code tabs.
+    fn add_code_tab(&mut self, tab: Tab) {
         if let Some(at) = self.dock.find_tab(&tab) {
             let _ = self.dock.set_active_tab(at);
             self.dock.set_focused_node_and_surface(at.node_path());
@@ -900,7 +928,7 @@ impl Workspace {
         }
         let code_leaf = self
             .dock
-            .find_tab_from(|t| matches!(t, Tab::Doc(_)))
+            .find_tab_from(|t| matches!(t, Tab::Doc(_) | Tab::Asset(_)))
             .or_else(|| self.dock.find_tab(&Tab::Start))
             .map(|at| at.node_path());
         match code_leaf {
@@ -915,10 +943,13 @@ impl Workspace {
     }
 
     fn close_doc(&mut self, path: &Path) {
-        if let Some(at) = self.dock.find_tab(&Tab::Doc(path.to_path_buf())) {
-            self.dock.remove_tab(at);
+        for tab in [Tab::Doc(path.to_path_buf()), Tab::Asset(path.to_path_buf())] {
+            if let Some(at) = self.dock.find_tab(&tab) {
+                self.dock.remove_tab(at);
+            }
         }
         self.docs.close(path);
+        self.assets.close(path);
         if self.active_doc.as_deref() == Some(path) {
             self.active_doc = None;
         }
@@ -1018,6 +1049,7 @@ struct Viewer<'a> {
     problems: &'a mut Problems,
     game: &'a mut GameSession,
     viewport: &'a mut Viewport,
+    assets: &'a mut AssetPreviews,
     settings: &'a Settings,
     actions: &'a mut Vec<Action>,
 }
@@ -1039,6 +1071,10 @@ impl TabViewer for Viewer<'_> {
                     Some(d) if d.is_dirty() => RichText::new(format!("{name} {}", icon::DOT)).into(),
                     _ => name.into(),
                 }
+            }
+            Tab::Asset(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                format!("{} {name}", assets::icon_for(path)).into()
             }
             Tab::Console => {
                 let (_, errors) = self.console.counts();
@@ -1076,6 +1112,7 @@ impl TabViewer for Viewer<'_> {
                     ui.label(RichText::new(t("editor.closed")).color(theme::TEXT_DIM));
                 }
             },
+            Tab::Asset(path) => self.assets.ui(ui, path, self.actions),
             Tab::Console => self.console.ui(ui, self.actions),
             Tab::Problems => self.problems.ui(ui, self.actions),
             Tab::Debug => {
@@ -1087,11 +1124,12 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
-        if let Tab::Doc(path) = tab {
+        let asset = matches!(tab, Tab::Asset(_));
+        if let Tab::Doc(path) | Tab::Asset(path) = tab {
             let rel = path.strip_prefix(self.root).unwrap_or(path);
             response.clone().on_hover_text(rel.display().to_string());
             if response.middle_clicked() {
-                self.actions.push(Action::CloseActive);
+                self.actions.push(if asset { Action::ForceClose(path.clone()) } else { Action::CloseActive });
             }
         }
     }
@@ -1108,6 +1146,10 @@ impl TabViewer for Viewer<'_> {
                     self.docs.close(path);
                     OnCloseResponse::Close
                 }
+            }
+            Tab::Asset(path) => {
+                self.assets.close(path);
+                OnCloseResponse::Close
             }
             _ => OnCloseResponse::Close,
         }

@@ -151,7 +151,7 @@ impl Explorer {
                 actions.push(Action::OpenFile(node.path.clone()));
             }
         }
-        if resp.double_clicked() && !node.dir && !is_text_file(&node.path) {
+        if resp.double_clicked() && !node.dir && !is_text_file(&node.path) && super::assets::kind(&node.path).is_none() {
             actions.push(Action::OpenExternal(node.path.clone()));
         }
         let root = self.root.clone();
@@ -197,8 +197,12 @@ fn dir_menu(ui: &mut egui::Ui, root: &Path, dir: &Path, actions: &mut Vec<Action
 }
 
 fn file_menu(ui: &mut egui::Ui, path: &Path, actions: &mut Vec<Action>) {
-    if is_text_file(path) && ui.button(t("explorer.open")).clicked() {
+    let preview = super::assets::kind(path).is_some();
+    if (is_text_file(path) || preview) && ui.button(t("explorer.open")).clicked() {
         actions.push(Action::OpenFile(path.to_path_buf()));
+    }
+    if preview && is_text_file(path) && ui.button(t("asset.open_text")).clicked() {
+        actions.push(Action::OpenText(path.to_path_buf()));
     }
     if ui.button(t("explorer.open_external")).clicked() {
         actions.push(Action::OpenExternal(path.to_path_buf()));

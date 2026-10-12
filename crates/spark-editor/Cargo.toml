@@ -26,6 +26,9 @@ engine = { package = "spark", path = "../spark" }
 # Same wgpu (30) / winit (0.30) as the engine: the viewport shares egui's GPU device (zero-copy).
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
 egui_dock = "0.21"
+# Asset previews: more image formats than the engine loads, sounds through the engine's kira.
+image = { workspace = true, features = ["bmp", "gif", "tga", "webp", "hdr"] }
+kira.workspace = true
 rfd = "0.17"
 notify = "8"
 trash = "5"
