@@ -18,6 +18,7 @@ mod audio;
 mod convert;
 mod debug_api;
 mod draw;
+pub mod error_screen;
 mod flow;
 mod light;
 mod ui_api;
@@ -38,7 +39,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use mlua::{ErrorContext, Function, Lua, MultiValue, Value};
-use spark_core::{Align, Color, Game, Layer, TextParams, Vec2, World};
+use spark_core::{Game, World};
 
 pub use runtime::TaskStatus;
 pub use save::default_save_path;
@@ -76,6 +77,9 @@ pub struct ScriptGame {
     deadline: Rc<std::cell::Cell<Option<Instant>>>,
     /// Scenario test run next to the game (`spark test`).
     test: Option<TestRun>,
+    /// What the error screen shows (built once per error).
+    error_view: Option<error_screen::ErrorView>,
+    shader_view: Option<error_screen::ErrorView>,
 }
 
 struct TestRun {
@@ -105,7 +109,13 @@ impl ScriptGame {
             timeout: std::time::Duration::from_secs(5),
             deadline: Rc::default(),
             test: None,
+            error_view: None,
+            shader_view: None,
         }
+    }
+
+    fn root(&self) -> PathBuf {
+        self.path.parent().map(Path::to_path_buf).unwrap_or_default()
     }
 
     /// Runs the scenario test `path` as a task next to the game (installs the `test` global).
@@ -179,6 +189,11 @@ impl ScriptGame {
         if let Some(dir) = self.path.parent() {
             let _ = std::fs::write(dir.join("error.log"), format!("{msg}\n"));
         }
+        let file = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let hint = format!(
+            "Fix the error and save the file ({file} or a module): the game reloads automatically.   F5 - restart   |   full text: error.log"
+        );
+        self.error_view = Some(error_screen::ErrorView::new("Script error", &msg, &self.root(), &hint));
         self.error = Some(msg);
     }
 
@@ -213,6 +228,7 @@ impl ScriptGame {
     fn load(&mut self, world: &mut World) {
         self.drop_lua();
         self.error = None;
+        self.error_view = None;
         self.modified = modified(&self.path);
         self.frame_started = world.time.frame;
         world.reset();
@@ -315,6 +331,7 @@ impl ScriptGame {
             log::info!("reloading {}", changed_module.as_deref().unwrap_or(&self.path).display());
             self.shader_mtimes.clear();
             self.shader_error = None;
+            self.shader_view = None;
             self.load(world);
             return;
         }
@@ -335,9 +352,16 @@ impl ScriptGame {
                         Ok(()) => {
                             log::info!("shader reloaded: {}", path.display());
                             self.shader_error = None;
+                            self.shader_view = None;
                         }
                         Err(e) => {
                             log::error!("{e}");
+                            let hint = "Fix the shader and save it: it reloads automatically (the previous version keeps running).";
+                            let mut v = error_screen::ErrorView::new("Shader error", &e, &self.root(), hint);
+                            if v.parsed.file.is_none() {
+                                v.parsed.file = Some(path.strip_prefix(self.root()).unwrap_or(&path).to_string_lossy().replace('\\', "/"));
+                            }
+                            self.shader_view = Some(v);
                             self.shader_error = Some(e);
                         }
                     }
@@ -357,6 +381,7 @@ impl ScriptGame {
             log::info!("restart requested by the script");
             self.shader_mtimes.clear();
             self.shader_error = None;
+            self.shader_view = None;
             self.load(world);
         } else {
             self.poll_files(world);
@@ -365,33 +390,6 @@ impl ScriptGame {
         let dt = world.time.dt as f64;
         self.run(world, |lua| runtime::begin_frame(lua, dt));
     }
-}
-
-/// Red error screen shown while the script is paused (players see what went wrong without a console).
-fn draw_error(world: &mut World, heading: &str, msg: &str, hint_text: &str) {
-    let c = &mut world.canvas;
-    let prev = c.layer();
-    c.set_layer(Layer::Ui);
-    let size = c.size();
-    let pad = (size.y * 0.05).max(16.0);
-    c.rect(Vec2::ZERO, size, Color::rgba(0.07, 0.01, 0.01, 0.92), Align::TOP_LEFT);
-    let title = TextParams { size: 30.0, color: Color::rgb(1.0, 0.38, 0.32), ..Default::default() };
-    c.text(heading, Vec2::new(pad, pad), &title);
-    let mut text: String = msg.chars().take(2500).collect();
-    if text.len() < msg.len() {
-        text.push_str(" ...");
-    }
-    let body = TextParams { size: 17.0, width: Some(size.x - pad * 2.0), line_height: 1.15, ..Default::default() };
-    c.text(&text, Vec2::new(pad, pad + 48.0), &body);
-    let hint = TextParams {
-        size: 15.0,
-        color: Color::rgb(0.7, 0.66, 0.64),
-        align: Align { x: 0.0, y: 1.0 },
-        width: Some(size.x - pad * 2.0),
-        ..Default::default()
-    };
-    c.text(hint_text, Vec2::new(pad, size.y - pad), &hint);
-    c.set_layer(prev);
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -437,10 +435,18 @@ impl Game for ScriptGame {
     }
 
     fn draw(&mut self, world: &mut World) {
-        if let Some(msg) = &self.error {
-            let file = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let hint = format!("Fix the error and save the file ({file} or a module): the game reloads automatically. (A copy is in error.log.)");
-            draw_error(world, "Script error", msg, &hint);
+        if self.error.is_some() {
+            if world.input.pressed(spark_core::Key::F5) {
+                log::info!("restart (F5 on the error screen)");
+                self.shader_mtimes.clear();
+                self.shader_error = None;
+                self.shader_view = None;
+                self.load(world);
+                return;
+            }
+            if let Some(v) = &self.error_view {
+                error_screen::draw(world, v);
+            }
             return;
         }
         self.run(world, |lua| {
@@ -449,8 +455,8 @@ impl Game for ScriptGame {
             }
             save::flush(lua)
         });
-        if let Some(msg) = &self.shader_error {
-            draw_error(world, "Shader error", msg, "Fix the shader and save it: it reloads automatically (the previous version keeps running).");
+        if let Some(v) = &self.shader_view {
+            error_screen::draw(world, v);
         }
     }
 
