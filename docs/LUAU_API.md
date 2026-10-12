@@ -698,6 +698,53 @@ Prints `file:line: message` per error and exits with code 1 (0 = ok). `--json` p
 
 `line` is `null` when the error has no location (e.g. a `game.toml` mistake). Input is empty during the check:
 code behind `input.pressed(...)` only runs in a real session (`spark . --headless` with a script that drives it, or a window).
+For that use scenario tests:
+
+## Scenario tests (spark test)
+
+```
+spark test path/to/game [NAME...] [--update] [--json] [--max-time SECONDS]
+```
+
+Every `tests/**/*.luau` file is one test (files starting with `_` are helpers for `require`). For each test the game
+starts fresh: headless, fixed 1/60 s steps, physics on, no audio, no GPU, save data in memory only (player saves are
+never touched). The test file runs as a task next to the game and plays it: it presses keys, waits, checks the state.
+The game's globals are visible, so call your own helpers to jump to a chapter (`goto_chapter(3)`).
+
+A test **fails** on a failed check, on **any** script error of the game, when it does not finish within `--max-time`
+seconds of game time (default 300), when the game calls `quit()` first, or when a snapshot changed.
+
+```lua
+-- tests/ch1_door.luau
+test.step("open the door")                  -- shown when the test fails
+local door = test.find("door")              -- waits up to 5 s for the object, returns it
+test.tap("e")                               -- press + release (one frame each)
+test.wait_until(function() return door.position.y > 2 end, 3, "door to open")
+test.eq(save.get("door_open"), true, "door flag")
+test.snapshot("door_open", { quest = Quest.state })  -- the world + your state vs tests/snapshots/
+```
+
+| function | |
+|---|---|
+| `test.press(key)` / `test.release(key)` | hold / release a key from the next frame on |
+| `test.tap(key)` / `test.hold(key, seconds)` | press and release (waits) |
+| `test.mouse(x, y)` / `test.button(name, down)` / `test.click(x?, y?, button?)` | mouse (window pixels) |
+| `test.text(s)` / `test.type(s)` | text input |
+| `test.wait(s)` / `test.frames(n)` | let the game run |
+| `test.wait_until(fn, timeout?, what?)` | wait for a condition, fail after `timeout` s (default 10) |
+| `test.wait_event(name, timeout?)` | wait for an event, fail on timeout; returns its arguments |
+| `test.find(name, timeout?)` | wait for an object by name (default 5 s) |
+| `test.expect(cond, msg?)` / `test.eq(actual, expected, msg?)` / `test.near(a, b, eps?, msg?)` / `test.fail(msg)` | checks (`near` works on numbers and vectors, eps 0.01) |
+| `test.step(name)` | name of the current step, printed on failure |
+| `test.snapshot(name, state?)` | compare the world (+ `state` table) with `tests/snapshots/<test>.<name>.snap` |
+
+Snapshots list every **named** object (position, rotation, scale, parent, body, hidden; rounded to 0.01), the camera,
+the number of unnamed objects and the `state` table flattened to `state.key = value` lines. The first run writes the
+file; later runs print what changed, e.g. `~ obj "guard_2": pos (0.00, 0.00, 4.00) -> (0.00, -48.20, 4.00)` or
+`- obj "bridge" = ...   (gone)`. Changes you meant: `spark test . --update`. Commit `tests/snapshots/`.
+
+Output: `PASS tests/a.luau (12.0 s game, 0.3 s real)` / `FAIL ...` with `file:line: message` and `at step: ...`;
+`--json`: `{"ok":false,"passed":1,"failed":1,"tests":[{"test":"tests/b.luau","ok":false,"error":{"file","line","message"},"step":"...","diffs":[{"snapshot","changes":[...]}]}]}`.
 
 ## Saving
 

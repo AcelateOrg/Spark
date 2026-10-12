@@ -155,6 +155,25 @@ spark . --headless --frames 60 --dump-scene            # every object: position,
 `spark check` and a headless run exit with code 1 on the first script error and print `file:line`, the message and a hint.
 Fix every error before moving on. `print(...)` goes to the log.
 
+## Scenario tests (spark test) - the main way to verify gameplay
+
+```
+spark test .                 # every tests/*.luau: PASS / FAIL file:line: message + at step + snapshot diff
+spark test . door            # only tests whose path contains "door"
+spark test . --update        # accept snapshot changes you meant
+```
+
+A test plays the game headless (fast, no GPU) with `test.tap("e")`, `test.wait(2)`, `test.find("door")`,
+`test.eq(a, b, msg)`, `test.snapshot("name", state)`; see "Scenario tests" in `docs/SPARK_API.md`.
+Any script error of the game fails the test. Snapshots catch side effects: everything named in the world is compared.
+
+Rules:
+- Do NOT play the game in a window or take screenshots to find logic bugs. Reproduce the bug in a test first
+  (it must FAIL), then fix it, then `spark check . && spark test .` must pass. Screenshots only for visual problems.
+- Every fixed bug and every finished chapter / quest step gets a test. Never delete or weaken a test to make it pass.
+- A snapshot diff you did not intend is a bug, not something to `--update`.
+- Start tests at the place you need through game helpers (e.g. `goto_chapter(3)`), not by replaying everything.
+
 ## Run and ship
 
 ```

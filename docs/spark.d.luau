@@ -610,6 +610,32 @@ declare time: {
     fixed_dt: number,
 }
 
+-- ===================================================================== scenario tests (spark test only)
+
+-- Exists only in files under tests/ run by `spark test`.
+declare test: {
+    press: (key: Key) -> (),
+    release: (key: Key) -> (),
+    tap: (key: Key) -> (),
+    hold: (key: Key, seconds: number?) -> (),
+    mouse: (x: number, y: number) -> (),
+    button: (name: string, down: boolean) -> (),
+    click: (x: number?, y: number?, button: string?) -> (),
+    text: (s: string) -> (),
+    type: (s: string) -> (),
+    wait: (seconds: number?) -> number,
+    frames: (n: number?) -> (),
+    wait_until: (condition: () -> boolean, timeout: number?, what: string?) -> (),
+    wait_event: (name: string, timeout: number?) -> ...any,
+    find: (name: string, timeout: number?) -> Object,
+    expect: <T>(cond: T, msg: string?) -> T,
+    eq: (actual: any, expected: any, msg: string?) -> (),
+    near: (actual: any, expected: any, eps: number?, msg: string?) -> (),
+    fail: (msg: string?) -> (),
+    step: (name: string) -> (),
+    snapshot: (name: string, state: any?) -> (),
+}
+
 -- ===================================================================== saving, window, misc
 
 declare save: {

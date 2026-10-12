@@ -7,6 +7,7 @@
 //! `spark docs path/to/game` - refresh the API docs inside a game after an engine update.
 //! `spark update [version]` - replace this spark executable with a GitHub release (Windows, Linux, macOS).
 //! `spark check path/to/game [--frames N] [--json]` - find script errors headless, without a window or GPU.
+//! `spark test path/to/game [NAME...] [--update] [--json]` - scenario tests in `tests/` (see `test.rs`).
 //!
 //! `spark build path/to/game` - a player build: ONE executable (this binary, no console window) with
 //! every game file packed inside, plus a .zip. When such an executable starts it runs its packed game.
@@ -17,6 +18,7 @@ mod dist;
 mod editor;
 mod icon;
 mod new;
+mod test;
 mod update;
 
 use spark_project::manifest;
@@ -35,6 +37,8 @@ const USAGE: &str = "Usage:
   spark docs path/to/game                 write the API docs + AGENTS.md (for AI agents) into a game
   spark check path/to/game [--frames N]   find script errors without a window or GPU (default 60 frames)
                            [--json]       machine-readable report: {ok, errors:[{file,line,message}], frames, objects}
+  spark test path/to/game [NAME...]       run scenario tests (tests/*.luau) headless; snapshots in tests/snapshots/
+                          [--update]      accept changed snapshots   [--json]   [--max-time SECONDS]
   spark update [version]                  download the latest (or given) Spark release from GitHub
   spark --version
   spark build path/to/game [--out DIR]    make a player build: one executable with everything inside (+ .zip / .tar.gz)
@@ -55,6 +59,7 @@ fn main() {
         Some("new") => std::process::exit(new::run(&raw[1..])),
         Some("docs") => std::process::exit(new::run_docs(&raw[1..])),
         Some("check") => std::process::exit(check::run(&raw[1..])),
+        Some("test") => std::process::exit(test::run(&raw[1..])),
         Some("update") => std::process::exit(update::run(&raw[1..])),
         Some("--version" | "-V") => {
             println!("spark {}", engine::VERSION);

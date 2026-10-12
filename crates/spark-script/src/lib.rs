@@ -27,6 +27,7 @@ mod physics;
 mod runtime;
 mod save;
 mod shader;
+pub mod testing;
 mod tween;
 mod types;
 
@@ -39,6 +40,7 @@ use std::time::{Duration, Instant, SystemTime};
 use mlua::{ErrorContext, Function, Lua, MultiValue, Value};
 use spark_core::{Align, Color, Game, Layer, TextParams, Vec2, World};
 
+pub use runtime::TaskStatus;
 pub use save::default_save_path;
 
 use convert::Shared;
@@ -72,6 +74,16 @@ pub struct ScriptGame {
     timeout: std::time::Duration,
     /// Deadline of the callback running now (checked by the Luau interrupt).
     deadline: Rc<std::cell::Cell<Option<Instant>>>,
+    /// Scenario test run next to the game (`spark test`).
+    test: Option<TestRun>,
+}
+
+struct TestRun {
+    path: PathBuf,
+    /// Name used in error locations, e.g. `tests/bridge.luau`.
+    name: String,
+    shared: testing::SharedTest,
+    status: Option<Rc<std::cell::Cell<TaskStatus>>>,
 }
 
 impl ScriptGame {
@@ -92,7 +104,35 @@ impl ScriptGame {
             modules: None,
             timeout: std::time::Duration::from_secs(5),
             deadline: Rc::default(),
+            test: None,
         }
+    }
+
+    /// Runs the scenario test `path` as a task next to the game (installs the `test` global).
+    /// `name` is how the file shows up in errors (e.g. `tests/bridge.luau`).
+    pub fn test(mut self, path: impl Into<PathBuf>, name: impl Into<String>) -> Self {
+        self.test = Some(TestRun { path: path.into(), name: name.into(), shared: Rc::default(), status: None });
+        self
+    }
+
+    /// State of the test task: `None` before it started, `Done` = passed, `Failed` = see [`Self::error`].
+    pub fn test_status(&self) -> Option<TaskStatus> {
+        self.test.as_ref().and_then(|t| t.status.as_ref()).map(|s| s.get())
+    }
+
+    /// Input the test queued since the last call (apply it before the next frame).
+    pub fn take_test_input(&mut self) -> Vec<testing::TestInput> {
+        self.test.as_ref().map(|t| std::mem::take(&mut t.shared.borrow_mut().input)).unwrap_or_default()
+    }
+
+    /// Snapshots recorded with `test.snapshot(name)`, in order.
+    pub fn test_snapshots(&self) -> Vec<(String, String)> {
+        self.test.as_ref().map(|t| t.shared.borrow().snapshots.clone()).unwrap_or_default()
+    }
+
+    /// Last `test.step(...)` name.
+    pub fn test_step(&self) -> Option<String> {
+        self.test.as_ref().and_then(|t| t.shared.borrow().step.clone())
     }
 
     /// Max run time of one script callback (default 5 s). A `while true do end` then stops with
@@ -219,6 +259,7 @@ impl ScriptGame {
             }
             Ok(())
         });
+        self.start_test(world);
         if self.error.is_none() {
             log::info!("script loaded: {}", self.path.display());
             let lines = source.lines().count();
@@ -229,6 +270,34 @@ impl ScriptGame {
                      `return Player` and `local Player = require(\"./src/player\")` (docs/LUAU_API.md, \"Game structure\")"
                 );
             }
+        }
+    }
+
+    /// Starts the scenario test (after the game's `start()` began). A restart of the game during
+    /// a test fails it: the test would start over and loop.
+    fn start_test(&mut self, world: &mut World) {
+        if self.error.is_some() {
+            return;
+        }
+        let Some(t) = &self.test else { return };
+        if t.status.is_some() {
+            return self.fail(format!("{}the game restarted (restart() or a reload) during the test", testing::FAIL_PREFIX));
+        }
+        let source = match spark_core::vfs::read_string(&t.path) {
+            Ok(s) => s,
+            Err(e) => return self.fail(format!("{}: {e}", t.name)),
+        };
+        let (name, shared) = (t.name.clone(), t.shared.clone());
+        let mut status = None;
+        self.run(world, |lua| {
+            testing::install(lua, shared)?;
+            let f = lua.load(source.as_str()).set_name(format!("@{name}")).into_function()?;
+            status = Some(runtime::spawn_task(lua, f, MultiValue::new()).map_err(|e| e.context("in test"))?.status);
+            Ok(())
+        });
+        if let Some(t) = &mut self.test {
+            // Failed right away: still mark it started.
+            t.status = Some(status.unwrap_or_else(|| Rc::new(std::cell::Cell::new(TaskStatus::Failed))));
         }
     }
 
