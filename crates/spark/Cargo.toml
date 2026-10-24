@@ -16,6 +16,8 @@ spark-render.workspace = true
 spark-audio.workspace = true
 spark-physics.workspace = true
 spark-script.workspace = true
+# `--devtools ADDR`: live link to Spark Editor.
+spark-devtools.workspace = true
 log.workspace = true
 env_logger.workspace = true
 

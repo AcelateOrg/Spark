@@ -414,6 +414,43 @@ impl Renderer {
         Ok(Self::build(instance, &adapter, device, queue, width, height))
     }
 
+    /// Renderer on a GPU device owned by someone else (the editor shares egui's device so the
+    /// game is drawn straight into a texture shown in the UI). Draw with [`Self::render_to_view`].
+    pub fn from_device(
+        instance: wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self::build(instance, adapter, device, queue, width.max(1), height.max(1))
+    }
+
+    /// The GPU device (shared with the caller when built by [`Self::from_device`]).
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// Draws the world into any texture view of `format` (sized like [`Self::size`]).
+    pub fn render_to_view(
+        &mut self,
+        world: &World,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+    ) -> Result<FrameStats, String> {
+        if self.is_device_lost() {
+            return Err("GPU device lost".into());
+        }
+        self.ensure_canvas_pipeline(format);
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("spark view") });
+        let mut stats = self.draw_scene(&mut encoder, world);
+        stats.post_passes = self.draw_post(&mut encoder, view, format, world);
+        self.last_stats = stats;
+        self.queue.submit([encoder.finish()]);
+        Ok(stats)
+    }
+
     pub fn info(&self) -> &GpuInfo {
         &self.info
     }

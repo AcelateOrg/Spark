@@ -6,6 +6,8 @@ use spark_core::branding::{SPARK_URL, Splash, splash_frame};
 use spark_core::{Game, ImageData, VERSION, World, run_frame};
 use spark_render::Renderer;
 use spark_window::winit;
+
+use crate::devtools::Devtools;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -33,6 +35,7 @@ Spark Engine flags:
   --no-splash           skip the splash even if the game enables it
   --fullscreen          start in borderless fullscreen
   --windowed            start in a window even if the game asks for fullscreen
+  --devtools ADDR       live link to Spark Editor (stats, scene, pause / step / reload); set by the editor
   --help                this text
 In a window: F1 toggles the debug overlay, F11 or Alt+Enter toggles fullscreen, F12 saves a screenshot to ./screenshots/
 Env: RUST_LOG=debug for more logs, WGPU_BACKEND=dx12|vulkan|gl to force a GPU API.";
@@ -59,6 +62,8 @@ pub struct RunArgs {
     pub no_splash: bool,
     pub fullscreen: bool,
     pub windowed: bool,
+    /// Spark Editor address (`--devtools 127.0.0.1:PORT`), windowed runs only.
+    pub devtools: Option<String>,
     pub help: bool,
     /// Arguments Spark does not know (e.g. a script path).
     pub rest: Vec<String>,
@@ -104,6 +109,7 @@ impl RunArgs {
                 "--no-splash" => out.no_splash = true,
                 "--fullscreen" => out.fullscreen = true,
                 "--windowed" => out.windowed = true,
+                "--devtools" => out.devtools = Some(value("--devtools")?),
                 "--help" | "-h" => out.help = true,
                 _ => out.rest.push(arg),
             }
@@ -530,10 +536,14 @@ fn run_windowed<G: Game>(app: App, game: G) -> Result<(), String> {
         cursor_locked: false,
         pointer: false,
         gamepads: spark_window::Gamepads::new(),
+        devtools: None,
         result: Ok(()),
     };
     runner.gamepads.init(&mut runner.world.input);
     event_loop.run_app(&mut runner).map_err(|e| format!("window event loop failed: {e}"))?;
+    if let Some(d) = &runner.devtools {
+        d.bye();
+    }
     runner.result
 }
 
@@ -564,6 +574,8 @@ struct Runner<G: Game> {
     /// Hand cursor shown (over the Spark badge).
     pointer: bool,
     gamepads: spark_window::Gamepads,
+    /// Live link to Spark Editor (`--devtools`).
+    devtools: Option<Devtools>,
     result: Result<(), String>,
 }
 
@@ -578,7 +590,9 @@ impl<G: Game> Runner<G> {
         self.last = now;
         self.gamepads.poll(&mut self.world.input);
         self.world.debug.record_frame(dt);
-        run_frame(&mut self.game, &mut self.world, dt);
+        if self.devtools.as_mut().is_none_or(|d| d.begin_frame(&mut self.world)) {
+            run_frame(&mut self.game, &mut self.world, dt);
+        }
         if self.world.quit_requested() {
             event_loop.exit();
         }
@@ -591,7 +605,9 @@ impl<G: Game> Runner<G> {
 
     /// Hides + captures the cursor while the game asks for it (`input.lock_mouse`) and the window has focus.
     fn apply_cursor_lock(&mut self) {
-        let want = self.world.input.lock_mouse && self.focused;
+        // Paused from the editor: give the mouse back so the editor can be used.
+        let paused = self.devtools.as_ref().is_some_and(Devtools::paused);
+        let want = self.world.input.lock_mouse && self.focused && !paused;
         if want == self.cursor_locked {
             return;
         }
@@ -650,6 +666,7 @@ impl<G: Game> Runner<G> {
             let (w, h) = r.size();
             self.world.canvas.set_output_size(w, h);
         }
+        let mut ran_logic = false;
         if let Some(splash) = &mut self.splash {
             if !splash_frame(&mut self.world, splash, dt) {
                 // Splash over: build the game (may take a moment), then run from a fresh clock.
@@ -658,13 +675,18 @@ impl<G: Game> Runner<G> {
                 self.last = Instant::now();
                 return;
             }
-        } else {
+            ran_logic = true;
+        } else if self.devtools.as_mut().is_none_or(|d| d.begin_frame(&mut self.world)) {
             run_frame(&mut self.game, &mut self.world, dt);
+            ran_logic = true;
         }
-        // Draw debug overlay on the canvas before rendering (on top of game content).
+        // Draw debug overlay on the canvas before rendering (on top of game content). Paused frames keep
+        // the previous canvas (it is cleared by run_frame), so the overlay is not drawn twice.
         let (gpu_name, stats) =
             self.renderer.as_ref().map(|r| (r.info().name.clone(), r.last_stats())).unwrap_or_default();
-        draw_debug_overlay(&mut self.world, &gpu_name, stats);
+        if ran_logic {
+            draw_debug_overlay(&mut self.world, &gpu_name, stats);
+        }
         self.apply_cursor_lock();
         self.apply_branding();
         self.apply_window();
@@ -696,6 +718,9 @@ impl<G: Game> Runner<G> {
         }
         self.frames += 1;
         self.fps_frames += 1;
+        if let Some(d) = &mut self.devtools {
+            d.end_frame(&self.world, renderer.last_stats(), self.game.error());
+        }
 
         let elapsed = (now - self.fps_timer).as_secs_f32();
         if elapsed >= 1.0 {
@@ -752,6 +777,10 @@ impl<G: Game> ApplicationHandler for Runner<G> {
         self.world.canvas.set_output_size(size.width.max(1), size.height.max(1));
         if !self.started {
             self.started = true;
+            if let Some(addr) = &self.app.args.devtools {
+                let gpu = self.renderer.as_ref().map(|r| r.info().to_string()).unwrap_or_default();
+                self.devtools = Devtools::connect(addr, &gpu);
+            }
             if self.splash.is_none() {
                 self.game.start(&mut self.world);
             }
