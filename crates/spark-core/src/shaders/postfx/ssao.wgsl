@@ -14,7 +14,7 @@ struct Params {
 
 // View-space position of the surface at uv (camera at origin, looking down -Z).
 fn view_pos_at(uv: vec2<f32>) -> vec3<f32> {
-    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, scene_depth(uv), 1.0);
+    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0 - scene_depth(uv), 1.0);
     let w = frame.inv_view_proj * ndc;
     return (frame.view * vec4<f32>(w.xyz / w.w, 1.0)).xyz;
 }
@@ -70,9 +70,11 @@ fn post(p: PostInput) -> vec4<f32> {
         }
         let scene_z = view_pos_at(suv).z;
         // Ignore occluders far outside the radius (e.g. a wall far in front of the pixel).
-        let range = smoothstep(0.0, 1.0, params.radius / max(abs(pos.z - scene_z), 1e-4));
+        let dist = abs(pos.z - scene_z);
+        let range = smoothstep(params.radius, 0.0, dist);
         occlusion = occlusion + select(0.0, 1.0, scene_z >= sample_pos.z + params.bias) * range;
     }
-    let ao = clamp(1.0 - occlusion / f32(count) * params.strength, 0.0, 1.0);
+    let ao_linear = clamp(1.0 - occlusion / f32(count) * params.strength, 0.0, 1.0);
+    let ao = ao_linear * ao_linear;
     return vec4<f32>(input.rgb * ao, input.a);
 }

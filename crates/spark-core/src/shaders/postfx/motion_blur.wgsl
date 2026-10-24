@@ -14,7 +14,7 @@ const MAX_BLUR_PIXELS: f32 = 32.0;
 
 fn post(p: PostInput) -> vec4<f32> {
     let input = input_color(p.uv);
-    let ndc = vec4<f32>(p.uv.x * 2.0 - 1.0, 1.0 - p.uv.y * 2.0, scene_depth(p.uv), 1.0);
+    let ndc = vec4<f32>(p.uv.x * 2.0 - 1.0, 1.0 - p.uv.y * 2.0, 1.0 - scene_depth(p.uv), 1.0);
     let world = frame.inv_view_proj * ndc;
     let prev = frame.prev_view_proj * vec4<f32>(world.xyz / world.w, 1.0);
     if (prev.w <= 0.0) {
