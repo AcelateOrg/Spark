@@ -714,6 +714,33 @@ local best = save.get("best_time", 0)
 save.set("settings", { volume = 0.8, fov = 75 })
 ```
 
+## Discord Rich Presence
+
+Shows what the player is doing on their Discord profile. Talks to the local Discord client over IPC on a
+background thread, so it never stalls a frame, survives hot reload, and needs no Discord SDK or login. If Discord
+is not running nothing happens; it connects by itself when Discord starts (checked every 15 s) and puts the
+presence back if Discord restarts. Updates go out at most once per 4 s (Discord's rate limit), always the latest,
+so calling `discord.set` every frame is fine.
+
+Create an application at discord.com/developers/applications: its name is the "Playing ..." title, its
+Application ID goes to `discord.connect`, images uploaded under Rich Presence -> Art Assets are referenced by key.
+
+- `discord.connect(app_id)` - the Application ID (a string of digits); again with the same id does nothing
+- `discord.set({ details, state, large_image, large_text, small_image, small_text, start, finish, buttons })` - all optional:
+  `details` / `state` are the two text lines, `*_image` are art asset keys, `*_text` their tooltips,
+  `start = true` shows time elapsed since the game started (or unix seconds, `os.time()`), `finish` a countdown to unix seconds,
+  `buttons = { { label = "Steam", url = "https://..." } }` at most 2 (other players see them, not you)
+- `discord.clear()` - remove the presence (still "Playing <app>"), `discord.shutdown()` - disconnect
+- `discord.status()` -> `"off"`, `"connecting"` (Discord not found yet) or `"connected"`
+
+Texts are cut to 128 characters. A presence Discord refuses (unknown image key, bad URL) is logged as a warning.
+Engines built without the `discord` feature keep the global with no-op functions.
+
+```lua
+discord.connect("123456789012345678")
+discord.set({ details = "Main menu", large_image = "logo", start = true })
+```
+
 ## Window
 
 - `window.fullscreen` (read/write, borderless), `window.title` (read/write; nil = game title), `window.width`, `window.height` (pixels, read-only)

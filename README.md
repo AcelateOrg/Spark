@@ -194,6 +194,7 @@ In a window: F1 = debug overlay, F12 = screenshot, F11 / Alt+Enter = fullscreen.
 | `spark-audio` | kira audio backend |
 | `spark-physics` | rapier3d backend |
 | `spark-script` | the Luau API, modules and hot reload (`ScriptGame`) |
+| `spark-discord` | Discord Rich Presence over local IPC, on its own thread (optional `discord` feature of `spark-script`, on by default) |
 | `spark-cli` | the `spark` executable: run, new, docs, build, update |
 
 Conventions: Y-up, right-handed, 1 unit = 1 meter, objects look along -Z, radians (FOV in degrees), sRGB colors.

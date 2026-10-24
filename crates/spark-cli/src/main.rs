@@ -28,6 +28,7 @@ use manifest::Manifest;
 const USAGE: &str = "Usage:
   spark path/to/game [flags]              run a game (folder with main.luau, or the .luau file)
   spark new path/to/game                  create a new game with the recommended layout
+    [--template 3d|2d|empty]              3d (default): small 3D scene, 2d: draw.* game, empty: only the skeleton
   spark docs path/to/game                 write the API docs + AGENTS.md (for AI agents) into a game
   spark check path/to/game [--frames N]   find script errors without a window or GPU (default 60 frames)
                            [--json]       machine-readable report: {ok, errors:[{file,line,message}], frames, objects}

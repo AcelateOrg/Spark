@@ -1,0 +1,14 @@
+[package]
+name = "spark-project"
+description = "Spark game projects: game.toml, project detection and the new-game template (shared by spark and Spark Editor)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# vfs (game.toml inside packed builds) and VERSION; no GPU / window code.
+spark-core.workspace = true

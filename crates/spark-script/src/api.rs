@@ -524,6 +524,7 @@ pub(crate) fn install(lua: &Lua) -> LuaResult<()> {
     crate::light::install(lua, &g)?;
     crate::model::install(lua, &g)?;
     crate::save::install(lua, &g)?;
+    crate::discord::install(lua, &g)?;
     crate::shader::install(lua, &g)?;
     crate::tween::install(lua)?;
     crate::debug_api::install(lua)?;

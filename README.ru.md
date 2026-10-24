@@ -191,6 +191,7 @@ spark --version
 | `spark-audio` | звук на kira |
 | `spark-physics` | физика на rapier3d |
 | `spark-script` | Luau API, модули и горячая перезагрузка (`ScriptGame`) |
+| `spark-discord` | Discord Rich Presence через локальный IPC в отдельном потоке (опциональная фича `discord` у `spark-script`, включена по умолчанию) |
 | `spark-cli` | исполняемый файл `spark`: run, new, docs, build, update |
 
 Соглашения: Y вверх, правая система координат, 1 единица = 1 метр, объекты смотрят вдоль -Z, радианы (FOV в градусах),

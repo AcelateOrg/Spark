@@ -1,0 +1,15 @@
+[package]
+name = "spark-discord"
+description = "Discord Rich Presence: a background IPC worker that survives script hot reload."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+discord-rich-presence = "1.1"
+log.workspace = true
+serde_json.workspace = true

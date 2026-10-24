@@ -623,6 +623,24 @@ declare save: {
     path: () -> string?,
 }
 
+declare discord: {
+    connect: (app_id: string) -> (),
+    set: (presence: {
+        details: string?,
+        state: string?,
+        large_image: string?,
+        large_text: string?,
+        small_image: string?,
+        small_text: string?,
+        start: (boolean | number)?,
+        finish: number?,
+        buttons: { { label: string, url: string } }?,
+    }) -> (),
+    clear: () -> (),
+    shutdown: () -> (),
+    status: () -> "off" | "connecting" | "connected",
+}
+
 declare window: {
     fullscreen: boolean,
     title: string?,
