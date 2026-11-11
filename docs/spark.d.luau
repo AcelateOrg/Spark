@@ -74,6 +74,7 @@ type LightSpec = {
     range: number?,
     angle: number?,
     softness: number?,
+    shadows: boolean?,
     position: vector?,
     rotation: vector?,
     parent: Object?,
@@ -193,6 +194,8 @@ declare extern type Shader with
     name: string
     kind: "surface" | "post"
     params: { string }
+    -- false = ignore the shader's `fn vertex` (engine vertex stage, plain depth: early depth testing stays on)
+    vertex: boolean
     texture1: (Texture | string)?
     texture2: (Texture | string)?
     -- `shader.<param>` reads / writes a field of `struct Params` in the WGSL code (any name).
@@ -255,6 +258,7 @@ declare extern type LightRef with
     range: number
     angle: number
     softness: number
+    shadows: boolean
 end
 
 declare extern type Object with
@@ -466,6 +470,10 @@ declare graphics: {
     shadows: boolean,
     shadow_distance: number,
     shadow_size: number,
+    light_shadows: number,
+    light_shadow_size: number,
+    light_shadow_updates: number,
+    light_shadow_soft: boolean,
     scene_width: number,
     scene_height: number,
     shader: Shader?,

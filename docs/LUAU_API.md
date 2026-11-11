@@ -390,6 +390,9 @@ t:cancel()
 - Point / spot lights (up to 32 nearest visible lights per frame; any object can carry one):
   - `light({ type = "point", color = "#ffd9a0", intensity = 1.5, range = 8, position = vec3(0, 3, 0) })` -> Object (invisible, only light)
   - `light({ type = "spot", angle = 30, softness = 0.3, ... })` - cone along the object's forward (-Z); aim with `rotation` or `obj:look_at(...)`
+  - `shadows = true` (also `obj.light.shadows`): the light casts shadows (a cube map, PCF). Only the `graphics.light_shadows`
+    nearest such lights in view get one; `obj.cast_shadow = false` keeps an object out, and the object carrying the light
+    (a bulb mesh around it) never shadows its own light
   - `spawn(mesh, mat, { light = { type = "point", ... } })` - glowing lamp mesh with its light
   - `obj.light` -> light ref (`.type .color .intensity .range .angle .softness`, read/write); `obj.light = {...}` / `obj.light = nil`
   - Flicker: change `obj.light.intensity` in `update`; flashlight: spot light that follows `camera.position/rotation`
@@ -418,6 +421,11 @@ graphics.post = { vhs }                            -- chain of full-screen passe
 - `graphics.msaa` = 1 / 2 / 4 (default) / 8 or true/false - anti-aliasing of the 3D scene (falls back to what the GPU supports)
 - `graphics.shadows` (default true), `graphics.shadow_distance` (meters around the camera, default 40),
   `graphics.shadow_size` (shadow map pixels, default 2048) - sun shadows; `obj.cast_shadow = false` per object
+- `graphics.light_shadows` (0..8, default 8: how many `shadows = true` lights get a shadow cube, the nearest first; 0 = off),
+  `graphics.light_shadow_size` (pixels per cube face, 64..2048, default 512), `graphics.light_shadow_updates` (how many cubes of
+  lights that did not move are re-drawn per frame, round robin; 0 = all, default). A new or moved light is always re-drawn
+  at once; with a small number, objects moving through a still light's shadow lag by a few frames.
+  `graphics.light_shadow_soft` (default true): 9 filtered taps per shadowed light; false = 4 (cheaper, slightly harder edges)
 - `graphics.scene_width`, `graphics.scene_height` -> current size of the 3D image in pixels (read-only)
 - `graphics.shader` = surface Shader or nil (default lit shader)
 - `graphics.post` = Shader, list of Shaders / `{ shader = s, size = "screen" | "scene" }`, or nil. `size = "scene"` runs the pass at
@@ -428,6 +436,9 @@ graphics.post = { vhs }                            -- chain of full-screen passe
   Colors are converted to linear. `shader:set({ a = 1, b = vec3(...) })` sets many. Unknown names error with the list of params.
 - `shader.texture1`, `shader.texture2` = Texture / image path / nil (bound as `texture1` / `texture2` in WGSL)
 - `shader.name`, `shader.kind` (`"surface"` | `"post"`), `shader.params` -> list of param names
+- `shader.vertex` (bool, default true): use the shader's own `fn vertex`. A custom vertex stage makes the engine write a
+  corrected depth per pixel (snapped / wobbling geometry keeps its true order), which turns off early depth testing for
+  everything drawn with it; `false` = the engine's vertex stage and plain depth (faster, e.g. a "PS1 wobble" option)
 - Per material / object: `mat:with_shader(s)`, `mat:with_data(a, b, c, d)`; `obj.shader`, `obj.data` (read/write);
   spawn props `shader = s`, `data = {a, b, c, d}`. `data` arrives in WGSL as `object.data` (per-object values, e.g. a hit flash).
 

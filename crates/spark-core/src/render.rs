@@ -70,6 +70,15 @@ pub struct RenderSettings {
     pub shadow_distance: f32,
     /// Shadow map resolution in pixels (square).
     pub shadow_size: u32,
+    /// How many point / spot lights with `shadows = true` get a shadow map (the ones closest to the camera), 0 = off.
+    pub light_shadows: u32,
+    /// Resolution of each face of a light's cube shadow map, pixels.
+    pub light_shadow_size: u32,
+    /// How many shadowed lights re-render their maps per frame (round robin), 0 = all of them every frame.
+    /// A light that is new to the set, moved or changed range is always re-rendered at once.
+    pub light_shadow_updates: u32,
+    /// Light shadow edges: 9 filtered taps (soft) or 4 (cheaper, a little harder edge).
+    pub light_shadow_soft: bool,
 }
 
 impl Default for RenderSettings {
@@ -86,6 +95,10 @@ impl Default for RenderSettings {
             shadows: true,
             shadow_distance: 40.0,
             shadow_size: 2048,
+            light_shadows: 8,
+            light_shadow_size: 512,
+            light_shadow_updates: 0,
+            light_shadow_soft: true,
         }
     }
 }

@@ -6,7 +6,7 @@ use spark_core::{Color, Light, LightKind, ObjectId};
 use crate::convert::*;
 use crate::types::{Obj, apply_props};
 
-const LIGHT_KEYS: &str = "type, color, intensity, range, angle, softness";
+const LIGHT_KEYS: &str = "type, color, intensity, range, angle, softness, shadows";
 
 fn default_light(kind: &str, what: &str) -> LuaResult<Light> {
     match kind {
@@ -17,7 +17,7 @@ fn default_light(kind: &str, what: &str) -> LuaResult<Light> {
 }
 
 fn is_light_key(k: &str) -> bool {
-    matches!(k, "type" | "color" | "intensity" | "range" | "angle" | "softness")
+    matches!(k, "type" | "color" | "intensity" | "range" | "angle" | "softness" | "shadows")
 }
 
 fn set_light_key(l: &mut Light, k: &str, v: &Value, what: &str) -> LuaResult<()> {
@@ -27,11 +27,13 @@ fn set_light_key(l: &mut Light, k: &str, v: &Value, what: &str) -> LuaResult<()>
             let mut fresh = default_light(&to_str(v, &w)?, what)?;
             fresh.color = l.color;
             fresh.intensity = l.intensity;
+            fresh.shadows = l.shadows;
             *l = fresh;
         }
         "color" => l.color = to_color(v, &w)?,
         "intensity" => l.intensity = to_num(v, &w)?.max(0.0),
         "range" => l.range = to_num(v, &w)?.max(0.01),
+        "shadows" => l.shadows = to_bool(v, &w)?,
         "angle" | "softness" => {
             let n = to_num(v, &w)?;
             let LightKind::Spot { angle, softness } = &mut l.kind else {
@@ -87,20 +89,21 @@ impl UserData for LightRef {
         f.add_field_method_get("color", |lua, this| with_light(lua, this.0, |l| Ok(crate::types::LuaColor(l.color))));
         f.add_field_method_get("intensity", |lua, this| with_light(lua, this.0, |l| Ok(l.intensity)));
         f.add_field_method_get("range", |lua, this| with_light(lua, this.0, |l| Ok(l.range)));
+        f.add_field_method_get("shadows", |lua, this| with_light(lua, this.0, |l| Ok(l.shadows)));
         f.add_field_method_get("angle", |lua, this| {
             with_light(lua, this.0, |l| Ok(match l.kind { LightKind::Spot { angle, .. } => Some(angle.to_degrees()), _ => None }))
         });
         f.add_field_method_get("softness", |lua, this| {
             with_light(lua, this.0, |l| Ok(match l.kind { LightKind::Spot { softness, .. } => Some(softness), _ => None }))
         });
-        for key in ["type", "color", "intensity", "range", "angle", "softness"] {
+        for key in ["type", "color", "intensity", "range", "angle", "softness", "shadows"] {
             f.add_field_method_set(key, move |lua, this, v: Value| with_light(lua, this.0, |l| set_light_key(l, key, &v, "light")));
         }
     }
 
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
         m.add_meta_method(mlua::MetaMethod::ToString, |lua, this, ()| {
-            with_light(lua, this.0, |l| Ok(format!("Light({:?}, range {:.1}, intensity {:.2})", l.kind, l.range, l.intensity)))
+            with_light(lua, this.0, |l| Ok(format!("Light({:?}, range {:.1}, intensity {:.2}, shadows {})", l.kind, l.range, l.intensity, l.shadows)))
         });
     }
 }

@@ -53,8 +53,9 @@ frame.screen        // scene width, scene height, output width, output height (p
 frame.time          // seconds, dt, real seconds (ignores time.scale), frame number
 frame.sun_dir.xyz, frame.sun_color.rgb, frame.ambient.rgb   // linear
 frame.fog_color.rgb, frame.fog                              // fog: near, far, enabled
-frame.light_count.x, frame.lights[i]                        // Light { position(xyz, w=range), color(rgb, w=1 spot), direction(xyz, w=cos outer), params(x=cos inner) }
+frame.light_count.x, frame.lights[i]                        // Light { position(xyz, w=range), color(rgb, w=1 spot), direction(xyz, w=cos outer), params(x=cos inner, y=shadow cube + 1, 0 = none) }
 frame.shadow_view_proj, frame.shadow                        // sun shadow map: world -> shadow clip; enabled, 1/size, normal offset, distance
+frame.light_shadow_view_proj[cube * 6 + face], frame.light_shadow  // light shadow cubes (faces +X -X +Y -Y +Z -Z); enabled, 1/size
 frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
 frame.sky_top.rgb, frame.sky_bottom.rgb, frame.sky          // sky gradient (linear); enabled, cubemap blend, lighting, cubemap mips
 frame.prev_view_proj                                        // view_proj of the previous frame (motion vectors, reprojection)
@@ -94,10 +95,11 @@ normal_texture                             // material normal map (flat if none)
 
 default_vertex(v) -> Fragment
 surface_color(uv) -> vec4<f32>             // object.color * base texture
-lighting(world_pos, normal) -> vec3<f32>   // ambient + sun (with shadows) + lights
+lighting(world_pos, normal) -> vec3<f32>   // ambient + sun (with shadows) + lights (with theirs)
 surface_normal(world_pos, normal, uv) -> vec3<f32>  // normal with the material normal map applied (normalized)
 pbr_lighting(world_pos, normal, base_rgb, metallic, roughness) -> vec3<f32>  // PBR version of base * lighting()
 sun_shadow(world_pos, normal) -> f32       // 1 = lit, 0 = in the sun's shadow (PCF); 1 when shadows are off
+light_shadow(i, world_pos, normal) -> f32  // the same for frame.lights[i]; 1 when that light has no shadow cube
 apply_fog(rgb, world_pos) -> vec3<f32>
 sky_color(dir, blur) -> vec3<f32>          // sky in a world direction (blur 0 = sharp .. 1 = blurriest mip); black without a sky
 ambient_light(normal) -> vec3<f32>         // indirect light: the sky with sky lighting on, else frame.ambient
@@ -131,6 +133,11 @@ fn vertex(v: VertexInput) -> Fragment {
     return f;
 }
 ```
+
+A shader with `fn vertex` writes a corrected depth per pixel (so a poster does not flicker through its snapped wall),
+which disables early depth testing: every covered pixel runs the full fragment shader, even hidden ones. To make the
+effect an option, keep one file and switch it at runtime: `s.vertex = false` uses the engine's vertex stage and plain
+depth (the `fn vertex` stays in the file, unused).
 
 ## Post shaders
 

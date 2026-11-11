@@ -74,9 +74,19 @@ struct FrameUniform {
     sky_bottom: [f32; 4],
     /// enabled, cubemap blend, lighting strength, cubemap mip count
     sky: [f32; 4],
+    /// world -> clip of each shadow cube face: slot * 6 + face (+X, -X, +Y, -Y, +Z, -Z).
+    light_shadow_view_proj: [[[f32; 4]; 4]; SHADOW_FACES],
+    /// enabled, 1 / face size, -, -
+    light_shadow: [f32; 4],
 }
 
 const MAX_LIGHTS: usize = spark_core::Light::MAX_VISIBLE;
+/// Point / spot lights with a shadow cube: six faces each, layers of one depth texture array.
+const MAX_SHADOWED: usize = spark_core::Light::MAX_SHADOWED;
+/// Must match the array length of `light_shadow_view_proj` in `common.wgsl`.
+const SHADOW_FACES: usize = MAX_SHADOWED * 6;
+/// Near plane of a light's shadow cube, meters.
+const LIGHT_SHADOW_NEAR: f32 = 0.05;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -87,7 +97,7 @@ struct LightUniform {
     color: [f32; 4],
     /// xyz = direction, w = cos(outer half angle).
     direction: [f32; 4],
-    /// x = cos(inner half angle).
+    /// x = cos(inner half angle), y = shadow slot + 1 (0 = none).
     params: [f32; 4],
 }
 
@@ -210,8 +220,37 @@ struct ShadowMap {
     view: wgpu::TextureView,
 }
 
+/// Shadow cubes of point / spot lights: a depth array, six layers per slot.
+struct LightShadowMap {
+    size: u32,
+    _texture: wgpu::Texture,
+    /// All layers (sampled by surface shaders).
+    view: wgpu::TextureView,
+    /// One view per layer (render targets).
+    layers: Vec<wgpu::TextureView>,
+}
+
+/// The light that owns a shadow slot. `fresh` = its cube was rendered for this position / range.
+#[derive(Clone, Copy)]
+struct LightSlot {
+    id: spark_core::ObjectId,
+    position: Vec3,
+    range: f32,
+    fresh: bool,
+}
+
+/// A light that asked for shadows this frame (`collect_lights`): its entry in the frame's light list.
+struct ShadowRequest {
+    distance: f32,
+    id: spark_core::ObjectId,
+    position: Vec3,
+    range: f32,
+    light: usize,
+}
+
 /// One object to draw this frame (before sorting / batching).
 struct Candidate {
+    id: spark_core::ObjectId,
     uniform: ObjectUniform,
     shader: ShaderRef,
     variant: u8,
@@ -222,6 +261,11 @@ struct Candidate {
     depth: f32,
     in_view: bool,
     caster: bool,
+    /// Casts into the shadow cube of a light rendered this frame.
+    light_caster: bool,
+    /// World bounding sphere.
+    center: Vec3,
+    radius: f32,
     triangles: u64,
 }
 
@@ -289,8 +333,24 @@ pub struct Renderer {
     /// 1x1 white cube bound when the sky has no cubemap.
     sky_dummy: GpuCube,
     cubemaps: Vec<GpuCube>,
-    /// What `frame_bind_group` was built with: shadow map size (None = dummy), sky cubemap.
-    frame_group_key: (Option<u32>, Option<usize>),
+    /// What `frame_bind_group` was built with: shadow map size (None = dummy), sky cubemap, light shadow face size.
+    frame_group_key: (Option<u32>, Option<usize>, Option<u32>),
+    /// One-layer map bound when no light casts shadows.
+    light_shadow_dummy: LightShadowMap,
+    light_shadow: Option<LightShadowMap>,
+    light_slots: [Option<LightSlot>; MAX_SHADOWED],
+    /// Round robin over the slots (`RenderSettings::light_shadow_updates`).
+    light_shadow_cursor: usize,
+    /// SHADOW_FACES view-projections, `light_shadow_stride` bytes apart (dynamic offsets).
+    light_shadow_buffer: wgpu::Buffer,
+    light_shadow_stride: u64,
+    light_shadow_bind_group: wgpu::BindGroup,
+    light_shadow_pipeline: wgpu::RenderPipeline,
+    light_batches: Vec<Batch3>,
+    /// Which rendered light (index into this frame's render list) each of `light_batches` belongs to.
+    light_batch_owner: Vec<usize>,
+    /// Cube faces (bit per face, `cube_face_mask`) each of `light_batches` can reach.
+    light_batch_faces: Vec<u8>,
     sky_pipeline_layout: wgpu::PipelineLayout,
     sky_shader: wgpu::ShaderModule,
     /// Skybox pipelines per MSAA sample count.
@@ -702,9 +762,22 @@ impl Renderer {
         let hdr_ok = hdr.allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
             && hdr.flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE | wgpu::TextureFormatFeatureFlags::BLENDABLE);
         let scene_format = if hdr_ok { HDR_FORMAT } else { COLOR_FORMAT };
+        // Without TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES on the device only the spec's 1x / 4x are valid,
+        // whatever the adapter reports (2x on NVIDIA / Vulkan: texture creation fails, then a panic).
+        let specific = device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
         let adapter_formats = [COLOR_FORMAT, DEPTH_FORMAT, scene_format]
             .into_iter()
-            .map(|f| (f, adapter.get_texture_format_features(f).flags))
+            .map(|f| {
+                let mut flags = adapter.get_texture_format_features(f).flags;
+                if !specific {
+                    flags.remove(
+                        wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X2
+                            | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X8
+                            | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X16,
+                    );
+                }
+                (f, flags)
+            })
             .collect::<HashMap<_, _>>();
         let frame_size = size_of::<FrameUniform>() as u64;
         let object_size = size_of::<ObjectUniform>() as u64;
@@ -744,6 +817,16 @@ impl Renderer {
                     count: None,
                 },
                 sampler_entry(4, fs),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: vf,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         );
         let object_layout = bind_group_layout(
@@ -797,6 +880,7 @@ impl Renderer {
             ..Default::default()
         });
         let shadow_dummy = shadow_map(&device, 1);
+        let light_shadow_dummy = light_shadow_map(&device, 1, 1);
         let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("spark sky sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -806,7 +890,7 @@ impl Renderer {
         });
         let sky_dummy = upload_cube(&device, &queue, &std::array::from_fn(|_| ImageData::solid(Color::WHITE)));
         let frame_bind_group =
-            frame_bind_group(&device, &frame_layout, &frame_buffer, &shadow_dummy.view, &shadow_sampler, &sky_dummy.view, &sky_sampler);
+            frame_bind_group(&device, &frame_layout, &frame_buffer, &shadow_dummy.view, &shadow_sampler, &sky_dummy.view, &sky_sampler, &light_shadow_dummy.view);
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("spark sky"),
             bind_group_layouts: &[Some(&frame_layout)],
@@ -839,32 +923,59 @@ impl Renderer {
             label: Some("spark shadow shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shadow.wgsl").into()),
         });
-        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("spark shadow"),
-            layout: Some(&shadow_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shadow_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &VERTEX_ATTRIBUTES[..1],
-                })],
-            },
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: SHADOW_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: Default::default(),
-                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.5, clamp: 0.0 },
-            }),
-            multisample: Default::default(),
-            fragment: None,
-            multiview_mask: None,
-            cache: None,
+        // Depth-only pipeline shared by the sun map and the light cubes (they differ in the view binding).
+        let depth_only = |label: &str, layout: &wgpu::PipelineLayout| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module: &shadow_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &VERTEX_ATTRIBUTES[..1],
+                    })],
+                },
+                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: SHADOW_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.5, clamp: 0.0 },
+                }),
+                multisample: Default::default(),
+                fragment: None,
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let shadow_pipeline = depth_only("spark shadow", &shadow_pipeline_layout);
+        // Light cubes: every face's view-projection lives in one buffer, picked with a dynamic offset.
+        let light_shadow_layout =
+            bind_group_layout(&device, "spark light shadow", &[uniform_entry(0, true, 64, wgpu::ShaderStages::VERTEX)]);
+        let light_shadow_stride = object_align.max(64);
+        let light_shadow_buffer = uniform_buffer(&device, "spark light shadow views", light_shadow_stride * SHADOW_FACES as u64);
+        let light_shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("spark light shadow"),
+            layout: &light_shadow_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &light_shadow_buffer,
+                    offset: 0,
+                    size: NonZeroU64::new(64),
+                }),
+            }],
         });
+        let light_shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("spark light shadow"),
+            bind_group_layouts: &[Some(&light_shadow_layout), Some(&object_layout)],
+            immediate_size: 0,
+        });
+        let light_shadow_pipeline = depth_only("spark light shadow", &light_shadow_pipeline_layout);
         let depth_resolve_layout = bind_group_layout(&device, "spark depth resolve", &[depth_entry(0, true, fs)]);
         let depth_resolve_layout_p = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("spark depth resolve"),
@@ -1002,7 +1113,18 @@ impl Renderer {
             sky_sampler,
             sky_dummy,
             cubemaps: Vec::new(),
-            frame_group_key: (None, None),
+            frame_group_key: (None, None, None),
+            light_shadow_dummy,
+            light_shadow: None,
+            light_slots: [None; MAX_SHADOWED],
+            light_shadow_cursor: 0,
+            light_shadow_buffer,
+            light_shadow_stride,
+            light_shadow_bind_group,
+            light_shadow_pipeline,
+            light_batches: Vec::new(),
+            light_batch_owner: Vec::new(),
+            light_batch_faces: Vec::new(),
             sky_pipeline_layout,
             sky_shader,
             sky_pipelines: HashMap::new(),
@@ -1422,7 +1544,42 @@ impl Renderer {
         let mut mats = std::mem::take(&mut self.world_matrices);
         let mut vis = std::mem::take(&mut self.world_visible);
         scene.compute_world_transforms(world.time.alpha(), &mut mats, &mut vis);
-        let (lights, light_count) = collect_lights(scene, &mats, &vis, &planes);
+        let (mut lights, light_count, shadow_requests) = collect_lights(scene, &mats, &vis, &planes);
+
+        // Shadow cubes of point / spot lights (light.shadows = true), the closest `light_shadows` of them.
+        let light_max = (rs.light_shadows as usize).min(MAX_SHADOWED);
+        let light_size = rs.light_shadow_size.clamp(64, self.device.limits().max_texture_dimension_2d.min(2048));
+        let want_light_shadows = light_max > 0 && !shadow_requests.is_empty();
+        let layers = (light_max * 6) as u32;
+        if want_light_shadows && self.light_shadow.as_ref().is_none_or(|m| m.size != light_size || m.layers.len() as u32 != layers) {
+            self.light_shadow = Some(light_shadow_map(&self.device, light_size, layers));
+            for s in self.light_slots.iter_mut().flatten() {
+                s.fresh = false;
+            }
+        } else if !want_light_shadows {
+            self.light_shadow = None;
+            self.light_slots = [None; MAX_SHADOWED];
+        }
+        let light_render = if want_light_shadows {
+            assign_light_shadows(
+                &mut self.light_slots,
+                &mut self.light_shadow_cursor,
+                shadow_requests,
+                light_max,
+                rs.light_shadow_updates as usize,
+                &mut lights,
+            )
+        } else {
+            Vec::new()
+        };
+        let mut light_vps = [[[0.0f32; 4]; 4]; SHADOW_FACES];
+        for (i, s) in self.light_slots.iter().enumerate() {
+            if let Some(s) = s {
+                for face in 0..6 {
+                    light_vps[i * 6 + face] = light_face_view_proj(s.position, s.range, face).to_cols_array_2d();
+                }
+            }
+        }
 
         // Sun shadow map.
         let max_dim = self.device.limits().max_texture_dimension_2d;
@@ -1435,10 +1592,11 @@ impl Renderer {
         }
         let sky = scene.sky;
         let sky_cube = sky.and_then(|s| s.cubemap).map(|c| c.0 as usize).filter(|&c| c < self.cubemaps.len());
-        let key = (self.shadow.as_ref().map(|m| m.size), sky_cube);
+        let key = (self.shadow.as_ref().map(|m| m.size), sky_cube, self.light_shadow.as_ref().map(|m| m.size * 64 + m.layers.len() as u32));
         if key != self.frame_group_key {
             let shadow_view = self.shadow.as_ref().map_or(&self.shadow_dummy.view, |m| &m.view);
             let sky_view = sky_cube.map_or(&self.sky_dummy.view, |c| &self.cubemaps[c].view);
+            let light_shadow_view = self.light_shadow.as_ref().map_or(&self.light_shadow_dummy.view, |m| &m.view);
             self.frame_bind_group = frame_bind_group(
                 &self.device,
                 &self.frame_layout,
@@ -1447,6 +1605,7 @@ impl Renderer {
                 &self.shadow_sampler,
                 sky_view,
                 &self.sky_sampler,
+                light_shadow_view,
             );
             self.frame_group_key = key;
         }
@@ -1489,8 +1648,18 @@ impl Renderer {
                 ],
                 None => [0.0; 4],
             },
+            light_shadow_view_proj: light_vps,
+            light_shadow: [flag(self.light_shadow.is_some()), 1.0 / light_size as f32, flag(rs.light_shadow_soft), 0.0],
         };
         self.queue.write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
+        if !light_render.is_empty() {
+            let stride = self.light_shadow_stride as usize;
+            let mut views = vec![0u8; stride * SHADOW_FACES];
+            for (i, vp) in light_vps.iter().enumerate() {
+                views[i * stride..i * stride + 64].copy_from_slice(bytemuck::bytes_of(vp));
+            }
+            self.queue.write_buffer(&self.light_shadow_buffer, 0, &views);
+        }
         if shadows {
             self.queue.write_buffer(&self.shadow_buffer, 0, bytemuck::bytes_of(&light_vp.to_cols_array_2d()));
         }
@@ -1519,9 +1688,14 @@ impl Renderer {
             let in_view = !outside_frustum(&(view_proj * model), &bounds);
             let transparent = m.is_transparent();
             let caster = shadows && m.cast_shadow && !transparent && !outside_frustum(&(light_vp * model), &bounds);
+            let scale = model.x_axis.truncate().length().max(model.y_axis.truncate().length()).max(model.z_axis.truncate().length());
+            let radius = if bounds.is_empty() { 0.0 } else { (bounds.max - bounds.min).length() * 0.5 * scale };
+            let light_caster = m.cast_shadow
+                && !transparent
+                && light_render.iter().any(|&(_, p, r)| center.distance_squared(p) < (r + radius) * (r + radius));
             if !in_view {
                 stats.culled += 1;
-                if !caster {
+                if !caster && !light_caster {
                     continue;
                 }
             }
@@ -1533,6 +1707,7 @@ impl Renderer {
             let normal_map = m.normal_map.map(|t| t.0 as usize).filter(|&t| t < self.textures.len());
             let emissive = m.emissive.to_linear();
             cands.push(Candidate {
+                id,
                 uniform: ObjectUniform {
                     model: model.to_cols_array_2d(),
                     normal_matrix: normal_matrix(&model).to_cols_array_2d(),
@@ -1550,6 +1725,9 @@ impl Renderer {
                 depth: -view.transform_point3(center).z,
                 in_view,
                 caster,
+                light_caster,
+                center,
+                radius,
                 triangles: (gpu_mesh.index_count / 3) as u64,
             });
         }
@@ -1590,30 +1768,70 @@ impl Renderer {
         let scene_count = order.len();
         order.extend((0..cands.len() as u32).filter(|&i| cands[i as usize].caster));
         order[scene_count..].sort_by_key(|&i| cands[i as usize].mesh);
+        let sun_end = order.len();
+        // One run of casters per light cube to render (objects whose bounding sphere reaches the light). The object
+        // carrying the light (a bulb mesh around it) would black the whole cube out, so it never casts for its own.
+        let mut light_ends = Vec::with_capacity(light_render.len());
+        for &(slot, p, r) in &light_render {
+            let owner = self.light_slots[slot].map(|s| s.id);
+            let start = order.len();
+            order.extend((0..cands.len() as u32).filter(|&i| {
+                let c = &cands[i as usize];
+                c.light_caster && Some(c.id) != owner && c.center.distance_squared(p) < (r + c.radius) * (r + c.radius)
+            }));
+            order[start..].sort_by_key(|&i| cands[i as usize].mesh);
+            light_ends.push(order.len());
+        }
 
         let mut scratch = std::mem::take(&mut self.scratch);
         scratch.clear();
         let mut batches = std::mem::take(&mut self.batches);
         let mut shadow_batches = std::mem::take(&mut self.shadow_batches);
+        let mut light_batches = std::mem::take(&mut self.light_batches);
+        let mut light_owner = std::mem::take(&mut self.light_batch_owner);
+        let mut light_faces = std::mem::take(&mut self.light_batch_faces);
         batches.clear();
         shadow_batches.clear();
+        light_batches.clear();
+        light_owner.clear();
+        light_faces.clear();
         let align = self.object_align as usize;
+        let mut owner = 0;
         for (slot, &ci) in order.iter().enumerate() {
             let c = &cands[ci as usize];
             let shadow_part = slot >= scene_count;
+            let light_part = slot >= sun_end;
+            while light_part && slot >= light_ends[owner] {
+                owner += 1;
+            }
             if !shadow_part {
                 stats.triangles += c.triangles;
             }
-            let list = if shadow_part { &mut shadow_batches } else { &mut batches };
+            let list = if light_part {
+                &mut light_batches
+            } else if shadow_part {
+                &mut shadow_batches
+            } else {
+                &mut batches
+            };
             let same = list.last().is_some_and(|b: &Batch3| {
                 (b.count as usize) < MAX_INSTANCES
                     && b.mesh == c.mesh
+                    && (!light_part || light_owner.last() == Some(&owner))
                     && (shadow_part
                         || (b.shader == c.shader && b.variant == c.variant && b.texture == c.texture && b.normal_map == c.normal_map))
             });
+            let faces = if light_part { cube_face_mask(c.center - light_render[owner].1, c.radius) } else { 0 };
             if same {
                 list.last_mut().expect("batch").count += 1; // checked is_some() above
+                if light_part {
+                    *light_faces.last_mut().expect("light batch") |= faces;
+                }
             } else {
+                if light_part {
+                    light_owner.push(owner);
+                    light_faces.push(faces);
+                }
                 scratch.resize(scratch.len().div_ceil(align) * align, 0);
                 list.push(Batch3 {
                     shader: c.shader,
@@ -1666,6 +1884,37 @@ impl Renderer {
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..b.count);
+            }
+        }
+
+        // Light shadow cubes: six depth passes per light, each drawing that light's casters.
+        if let Some(map) = self.light_shadow.as_ref() {
+            for (k, &(slot, _, _)) in light_render.iter().enumerate() {
+                for face in 0..6 {
+                    let layer = slot * 6 + face;
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("spark light shadow"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &map.layers[layer],
+                            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(&self.light_shadow_pipeline);
+                    pass.set_bind_group(0, &self.light_shadow_bind_group, &[(layer as u64 * self.light_shadow_stride) as u32]);
+                    let bit = 1u8 << face;
+                    for (b, _) in light_batches.iter().zip(light_owner.iter().zip(&light_faces)).filter(|(_, (o, f))| **o == k && **f & bit != 0) {
+                        pass.set_bind_group(1, &self.object_bind_group, &[b.offset]);
+                        let mesh = self.meshes[b.mesh].as_ref().expect("uploaded mesh"); // candidates filtered to have uploaded meshes
+                        pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..b.count);
+                    }
+                }
             }
         }
 
@@ -1764,6 +2013,9 @@ impl Renderer {
         }
         self.batches = batches;
         self.shadow_batches = shadow_batches;
+        self.light_batches = light_batches;
+        self.light_batch_owner = light_owner;
+        self.light_batch_faces = light_faces;
 
         // Post shaders and depth-based built-in effects (SSAO, depth of field, motion blur)
         // read the single-sample depth: resolve it only when one of them will run.
@@ -2114,9 +2366,15 @@ fn ensure_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, s: &mut
 
 /// Lights that can touch the view (sphere vs frustum), closest first, packed for the shader.
 /// Always sorted, ties broken by object index, so the chosen set does not flicker between frames.
-fn collect_lights(scene: &spark_core::Scene, mats: &[Mat4], vis: &[bool], planes: &[Vec4; 6]) -> ([LightUniform; MAX_LIGHTS], usize) {
+/// Also returns the lights in that list that asked for shadows (`ShadowRequest::light` = their index in it).
+fn collect_lights(
+    scene: &spark_core::Scene,
+    mats: &[Mat4],
+    vis: &[bool],
+    planes: &[Vec4; 6],
+) -> ([LightUniform; MAX_LIGHTS], usize, Vec<ShadowRequest>) {
     let cam = scene.camera.position;
-    let mut found: Vec<(f32, u32, LightUniform)> = Vec::new();
+    let mut found: Vec<(f32, spark_core::ObjectId, LightUniform, bool)> = Vec::new();
     for (id, obj) in scene.iter() {
         let Some(light) = obj.light else { continue };
         let i = id.index() as usize;
@@ -2144,17 +2402,70 @@ fn collect_lights(scene: &spark_core::Scene, mats: &[Mat4], vis: &[bool], planes
             direction: dir.extend(outer).to_array(),
             params: [inner, 0.0, 0.0, 0.0],
         };
-        found.push(((pos.distance(cam) - light.range).max(0.0), id.index(), u));
+        found.push(((pos.distance(cam) - light.range).max(0.0), id, u, light.shadows));
     }
     if found.len() > MAX_LIGHTS {
-        found.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        found.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.index().cmp(&b.1.index())));
     }
     let mut out = [LightUniform::zeroed(); MAX_LIGHTS];
     let n = found.len().min(MAX_LIGHTS);
-    for (slot, (_, _, u)) in out.iter_mut().zip(found) {
+    let mut shadows = Vec::new();
+    for (i, (slot, (distance, id, u, cast))) in out.iter_mut().zip(found).enumerate() {
         *slot = u;
+        if cast {
+            let p = u.position;
+            shadows.push(ShadowRequest { distance, id, position: Vec3::new(p[0], p[1], p[2]), range: p[3], light: i });
+        }
     }
-    (out, n)
+    (out, n, shadows)
+}
+
+/// Gives the closest shadow requests a slot (a light keeps the slot it had) and picks which cubes to render:
+/// every slot whose light is new, moved or changed range, plus `updates` of the others round robin (0 = all).
+/// Returns (slot, position, range) of the cubes to render; writes the slot into each light's `params.y`.
+fn assign_light_shadows(
+    slots: &mut [Option<LightSlot>; MAX_SHADOWED],
+    cursor: &mut usize,
+    mut requests: Vec<ShadowRequest>,
+    max: usize,
+    updates: usize,
+    lights: &mut [LightUniform; MAX_LIGHTS],
+) -> Vec<(usize, Vec3, f32)> {
+    requests.sort_by(|a, b| a.distance.total_cmp(&b.distance).then(a.id.index().cmp(&b.id.index())));
+    let max = max.min(MAX_SHADOWED);
+    requests.truncate(max);
+    for (i, slot) in slots.iter_mut().enumerate() {
+        if i >= max || slot.is_some_and(|s| !requests.iter().any(|r| r.id == s.id)) {
+            *slot = None;
+        }
+    }
+    for r in &requests {
+        let i = match slots.iter().position(|s| s.is_some_and(|s| s.id == r.id)) {
+            Some(i) => i,
+            None => slots[..max].iter().position(Option::is_none).expect("a free slot: requests <= max"),
+        };
+        let fresh = slots[i].is_some_and(|s| s.fresh && s.position.distance_squared(r.position) < 1e-6 && (s.range - r.range).abs() < 1e-4);
+        slots[i] = Some(LightSlot { id: r.id, position: r.position, range: r.range, fresh });
+        lights[r.light].params[1] = (i + 1) as f32;
+    }
+    let mut render: Vec<usize> = (0..MAX_SHADOWED).filter(|&i| slots[i].is_some_and(|s| !s.fresh)).collect();
+    let stale: Vec<usize> = (0..MAX_SHADOWED).filter(|&i| slots[i].is_some_and(|s| s.fresh)).collect();
+    if updates == 0 {
+        render.extend(stale);
+    } else if !stale.is_empty() {
+        for k in 0..updates.min(stale.len()) {
+            render.push(stale[(*cursor + k) % stale.len()]);
+        }
+        *cursor = (*cursor + updates) % stale.len();
+    }
+    render
+        .into_iter()
+        .map(|i| {
+            let s = slots[i].as_mut().expect("assigned slot");
+            s.fresh = true;
+            (i, s.position, s.range)
+        })
+        .collect()
 }
 
 fn request_adapter(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<wgpu::Adapter, String> {
@@ -2209,7 +2520,8 @@ fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue)
     // Ask only for WebGL2-level limits so weak / old GPUs (and the GL backend) work.
     let desc = wgpu::DeviceDescriptor {
         label: Some("spark"),
-        required_features: wgpu::Features::empty(),
+        // lets MSAA use every sample count the GPU has (2x / 8x), not only the spec's 4x
+        required_features: adapter.features() & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
         required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
         memory_hints: wgpu::MemoryHints::Performance,
         ..Default::default()
@@ -2282,6 +2594,68 @@ fn object_buffer(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, capacity
     (buffer, bind_group)
 }
 
+fn light_shadow_map(device: &wgpu::Device, size: u32, layers: u32) -> LightShadowMap {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("spark light shadow map"),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: layers },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: SHADOW_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let layers = (0..layers)
+        .map(|l| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: l,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
+    LightShadowMap { size, _texture: texture, view, layers }
+}
+
+/// Faces of a shadow cube (bit = face index of `light_face_view_proj`) that a sphere at `d` from the light, radius `r`,
+/// can touch. A face's 90 degree frustum is bounded by the planes `axis = +-other axis`; a sphere is out when it lies
+/// fully behind one of them, i.e. its signed distance `(axis - |other|) / sqrt(2)` is below `-r`.
+fn cube_face_mask(d: Vec3, r: f32) -> u8 {
+    let slack = -r * std::f32::consts::SQRT_2;
+    let a = d.abs();
+    let reach = |axis: f32, o1: f32, o2: f32| axis - o1 >= slack && axis - o2 >= slack;
+    let mut mask = 0;
+    for (i, (axis, o1, o2)) in [(d.x, a.y, a.z), (-d.x, a.y, a.z), (d.y, a.x, a.z), (-d.y, a.x, a.z), (d.z, a.x, a.y), (-d.z, a.x, a.y)]
+        .into_iter()
+        .enumerate()
+    {
+        if reach(axis, o1, o2) {
+            mask |= 1 << i;
+        }
+    }
+    mask
+}
+
+/// View-projection of one face of a light's shadow cube (+X, -X, +Y, -Y, +Z, -Z), depth 0 (near) .. 1 (far).
+fn light_face_view_proj(position: Vec3, range: f32, face: usize) -> Mat4 {
+    const FACES: [(Vec3, Vec3); 6] = [
+        (Vec3::X, Vec3::NEG_Y),
+        (Vec3::NEG_X, Vec3::NEG_Y),
+        (Vec3::Y, Vec3::Z),
+        (Vec3::NEG_Y, Vec3::NEG_Z),
+        (Vec3::Z, Vec3::NEG_Y),
+        (Vec3::NEG_Z, Vec3::NEG_Y),
+    ];
+    let (dir, up) = FACES[face];
+    let proj = spark_core::glam::camera::rh::proj::directx::perspective(std::f32::consts::FRAC_PI_2, 1.0, LIGHT_SHADOW_NEAR, range.max(LIGHT_SHADOW_NEAR * 4.0));
+    proj * spark_core::glam::camera::rh::view::look_to_mat4(position, dir, up)
+}
+
 fn shadow_map(device: &wgpu::Device, size: u32) -> ShadowMap {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("spark shadow map"),
@@ -2304,6 +2678,7 @@ fn frame_bind_group(
     sampler: &wgpu::Sampler,
     sky: &wgpu::TextureView,
     sky_sampler: &wgpu::Sampler,
+    light_shadow: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("spark frame"),
@@ -2314,6 +2689,7 @@ fn frame_bind_group(
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(sky) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(sky_sampler) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(light_shadow) },
         ],
     })
 }
@@ -2562,6 +2938,41 @@ mod tests {
     }
 
     #[test]
+    fn cube_face_mask_covers_every_face_a_sphere_touches() {
+        // Every point of the sphere lands in the face of its major axis: that face must be in the mask.
+        let face_of = |v: Vec3| {
+            let a = v.abs();
+            if a.x >= a.y && a.x >= a.z {
+                if v.x > 0.0 { 0 } else { 1 }
+            } else if a.y >= a.z {
+                if v.y > 0.0 { 2 } else { 3 }
+            } else if v.z > 0.0 {
+                4
+            } else {
+                5
+            }
+        };
+        let mut seed = 7u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+        };
+        for _ in 0..2000 {
+            let d = Vec3::new(rnd(), rnd(), rnd()) * 6.0;
+            let r = rnd().abs() * 2.0;
+            let mask = cube_face_mask(d, r);
+            for _ in 0..64 {
+                let p = d + Vec3::new(rnd(), rnd(), rnd()).normalize_or_zero() * r;
+                assert!(mask & (1 << face_of(p)) != 0, "d {d} r {r} mask {mask:06b} misses {p}");
+            }
+        }
+        // A small box well inside +X reaches only that face.
+        assert_eq!(cube_face_mask(Vec3::new(4.0, 0.2, -0.3), 0.5), 1);
+        // A sphere around the light reaches all of them.
+        assert_eq!(cube_face_mask(Vec3::new(0.1, 0.0, 0.0), 1.0), 0b11_1111);
+    }
+
+    #[test]
     fn normal_matrix_keeps_normals_perpendicular_under_shear() {
         // Child rotated 45° under a parent scaled (3, 1, 1): the world matrix has shear.
         let parent = Mat4::from_scale(Vec3::new(3.0, 1.0, 1.0));
@@ -2677,6 +3088,51 @@ mod tests {
         }
         let error = pollster::block_on(scope.pop());
         assert!(error.is_none(), "GPU validation error: {error:?}");
+    }
+
+    /// A shadowed point light: a blocker below it darkens the floor (-Y face of the cube), one beside it darkens the
+    /// wall (+X face). Each face only draws the casters that reach it, so this also checks that culling keeps them.
+    #[test]
+    fn light_shadow_cube_faces_keep_their_casters() {
+        use spark_core::Light;
+        let Ok(mut r) = Renderer::new_headless(64, 64) else { return eprintln!("skipping GPU test: no adapter") };
+        let mut world = World::default();
+        world.scene.background = Color::BLACK;
+        world.scene.ambient = Color::BLACK;
+        world.scene.sun.intensity = 0.0;
+        world.render.shadows = false;
+        let cube = world.add_mesh(MeshData::cube(1.0));
+        let white = Material::color(Color::WHITE);
+        let floor = world.spawn(cube, white.clone());
+        let o = world.scene.get_mut(floor).unwrap();
+        o.position = Vec3::new(0.0, -0.05, 0.0);
+        o.scale = Vec3::new(12.0, 0.1, 12.0);
+        let wall = world.spawn(cube, white.clone());
+        let o = world.scene.get_mut(wall).unwrap();
+        o.position = Vec3::new(3.05, 2.0, 0.0);
+        o.scale = Vec3::new(0.1, 6.0, 12.0);
+        let lamp = world.spawn_empty();
+        let o = world.scene.get_mut(lamp).unwrap();
+        o.position = Vec3::new(0.0, 2.0, 0.0);
+        let mut light = Light::point(Color::WHITE, 3.0, 9.0);
+        light.shadows = true;
+        o.light = Some(light);
+        let mut shade = |world: &mut World, blocker: Vec3, eye: Vec3, at: Vec3| {
+            world.scene.camera.position = eye;
+            world.scene.camera.look_at(at);
+            let lit = r.screenshot(world).expect("screenshot").pixel(32, 32);
+            let b = world.spawn(cube, white.clone());
+            let o = world.scene.get_mut(b).unwrap();
+            o.position = blocker;
+            o.scale = Vec3::splat(0.3);
+            let dark = r.screenshot(world).expect("screenshot").pixel(32, 32);
+            world.scene.destroy(b);
+            (lit[0], dark[0])
+        };
+        let (lit, dark) = shade(&mut world, Vec3::new(0.4, 1.0, 0.0), Vec3::new(0.8, 6.0, 3.0), Vec3::new(0.8, 0.0, 0.0));
+        assert!(lit > 40 && dark < lit / 3, "floor under the blocker: lit {lit}, shadowed {dark}");
+        let (lit, dark) = shade(&mut world, Vec3::new(1.5, 2.0, 0.0), Vec3::new(0.5, 2.0, 3.0), Vec3::new(3.0, 2.0, 0.0));
+        assert!(lit > 40 && dark < lit / 3, "wall beside the blocker: lit {lit}, shadowed {dark}");
     }
 
     /// Emissive light shows on a black surface in the dark; past its LOD distance an object

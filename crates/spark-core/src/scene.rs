@@ -192,17 +192,21 @@ pub struct Light {
     pub color: Color,
     pub intensity: f32,
     pub range: f32,
+    /// Casts shadows (a cube shadow map, see `RenderSettings::light_shadows`).
+    pub shadows: bool,
 }
 
 impl Light {
     pub const MAX_VISIBLE: usize = 64;
+    /// Upper limit of `RenderSettings::light_shadows`.
+    pub const MAX_SHADOWED: usize = 8;
 
     pub fn point(color: Color, intensity: f32, range: f32) -> Self {
-        Self { kind: LightKind::Point, color, intensity, range }
+        Self { kind: LightKind::Point, color, intensity, range, shadows: false }
     }
 
     pub fn spot(color: Color, intensity: f32, range: f32, angle: f32, softness: f32) -> Self {
-        Self { kind: LightKind::Spot { angle, softness }, color, intensity, range }
+        Self { kind: LightKind::Spot { angle, softness }, color, intensity, range, shadows: false }
     }
 }
 

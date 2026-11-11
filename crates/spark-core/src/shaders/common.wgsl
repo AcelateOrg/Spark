@@ -6,7 +6,7 @@ struct Light {
     position: vec4<f32>,   // xyz = world position, w = range
     color: vec4<f32>,      // rgb = linear color * intensity, w = 1 for spot lights
     direction: vec4<f32>,  // xyz = direction, w = cos(outer half angle)
-    params: vec4<f32>,     // x = cos(inner half angle)
+    params: vec4<f32>,     // x = cos(inner half angle), y = shadow slot + 1 (0 = no shadow map, see `light_shadow`)
 };
 
 struct Frame {
@@ -31,6 +31,8 @@ struct Frame {
     sky_top: vec4<f32>,     // rgb, linear
     sky_bottom: vec4<f32>,  // rgb, linear
     sky: vec4<f32>,         // enabled (0 / 1), cubemap blend (0 = no cubemap), lighting strength, cubemap mip count
+    light_shadow_view_proj: array<mat4x4<f32>, 48>, // world -> clip of each light's shadow cube face (slot * 6 + face)
+    light_shadow: vec4<f32>, // enabled (0 / 1), 1 / face size (pixels), soft (9 taps) / 4 taps
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;

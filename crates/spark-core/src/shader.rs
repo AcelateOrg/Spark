@@ -109,6 +109,9 @@ pub struct ShaderData {
     pub textures: [Option<TextureId>; 2],
     /// Bumped when the code changes (hot reload); the renderer rebuilds its pipeline.
     pub version: u64,
+    /// Whether the code's own `fn vertex` is used (`set_vertex`). Off = the engine's vertex stage and
+    /// plain rasterized depth, which keeps early depth testing.
+    pub vertex: bool,
 }
 
 /// `code` with `// line` and `/* block */` comments replaced by spaces (line numbers kept).
@@ -197,6 +200,11 @@ pub fn skybox_source() -> String {
 
 /// Game code + engine prelude for `kind`.
 pub fn compose(code: &str, kind: ShaderKind) -> String {
+    compose_with(code, kind, true)
+}
+
+/// [`compose`]; `vertex = false` ignores the code's `fn vertex` (it stays in the source, unused).
+pub fn compose_with(code: &str, kind: ShaderKind, vertex: bool) -> String {
     let mut s = String::with_capacity(code.len() + 8192);
     s.push_str(code);
     s.push_str(COMMON);
@@ -205,7 +213,7 @@ pub fn compose(code: &str, kind: ShaderKind) -> String {
     }
     match kind {
         ShaderKind::Surface => {
-            let vs = if defines_fn(code, "vertex") { "vertex" } else { "default_vertex" };
+            let vs = if vertex && defines_fn(code, "vertex") { "vertex" } else { "default_vertex" };
             let fs = if defines_fn(code, "fragment") { "fragment" } else { "default_fragment" };
             s.push_str(SKY);
             let mut surface = SURFACE.replace("SPARK_VERTEX", vs).replace("SPARK_FRAGMENT", fs);
@@ -245,7 +253,19 @@ impl ShaderData {
             values: vec![0; size.max(16)],
             textures: [None, None],
             version: 0,
+            vertex: true,
         })
+    }
+
+    /// Turns the code's `fn vertex` on / off (a surface shader's PS1 snapping, wobble, ...). With it on, the
+    /// engine also writes a corrected depth per pixel, which costs early depth testing: off is faster.
+    pub fn set_vertex(&mut self, on: bool) {
+        if on == self.vertex {
+            return;
+        }
+        self.vertex = on;
+        self.source = compose_with(&self.code, self.kind, on);
+        self.version += 1;
     }
 
     /// Replaces the code (hot reload). Keeps values of params that still exist with the same type.
@@ -258,6 +278,7 @@ impl ShaderData {
             }
         }
         new.textures = self.textures;
+        new.set_vertex(self.vertex);
         new.version = self.version + 1;
         *self = new;
         Ok(())
@@ -480,6 +501,21 @@ mod tests {
         assert!(err.contains("bad.wgsl:2"), "{err}");
         let both = "fn post(p: PostInput) -> vec4<f32> { return vec4<f32>(1.0); }\nfn fragment(f: Fragment) -> vec4<f32> { return vec4<f32>(1.0); }";
         assert!(ShaderData::compile("both.wgsl", both).is_err());
+    }
+
+    #[test]
+    fn vertex_toggle_switches_the_entry_points() {
+        let code = "struct Params { grid: f32 }\nfn vertex(v: VertexInput) -> Fragment { return default_vertex(v); }";
+        let mut s = ShaderData::compile("snap", code).expect("compiles");
+        assert!(s.source.contains("fn spark_fs_raster(") && s.vertex);
+        let v = s.version;
+        s.set_vertex(false);
+        assert!(!s.source.contains("fn spark_fs_raster(") && s.version == v + 1);
+        naga::front::wgsl::parse_str(&s.source).expect("still valid WGSL");
+        s.recompile(code).expect("recompiles");
+        assert!(!s.vertex && !s.source.contains("fn spark_fs_raster("), "hot reload keeps the toggle");
+        s.set_vertex(true);
+        assert!(s.source.contains("fn spark_fs_raster("));
     }
 
     #[test]

@@ -72,6 +72,7 @@ fn get_field(lua: &Lua, id: ShaderId, key: &str) -> LuaResult<Value> {
     match key {
         "name" => return Ok(Value::String(lua.create_string(&data.name)?)),
         "kind" => return Ok(Value::String(lua.create_string(kind_name(data.kind))?)),
+        "vertex" if data.find_param("vertex").is_none() => return Ok(Value::Boolean(data.vertex)),
         "params" => {
             let t = lua.create_table()?;
             for (i, p) in data.params.iter().enumerate() {
@@ -91,7 +92,7 @@ fn get_field(lua: &Lua, id: ShaderId, key: &str) -> LuaResult<Value> {
     let Some(p) = data.find_param(key) else {
         let names: Vec<&str> = data.params.iter().map(|p| p.name.as_str()).collect();
         return Err(rt(format!(
-            "{}: no param or field '{key}' (params: {}; fields: name, kind, params, texture1, texture2)",
+            "{}: no param or field '{key}' (params: {}; fields: name, kind, params, vertex, texture1, texture2)",
             data.name,
             if names.is_empty() { "none - declare `struct Params { ... }` in the shader".to_string() } else { names.join(", ") }
         )));
@@ -122,6 +123,13 @@ fn set_field(lua: &Lua, id: ShaderId, key: &str, v: Value) -> LuaResult<()> {
     }
     with(lua, |w| {
         let s = w.assets.shader_mut(id).ok_or_else(|| rt("shader was unloaded"))?;
+        if key == "vertex" && s.find_param(key).is_none() {
+            let Value::Boolean(on) = v else {
+                return Err(rt(format!("{}.vertex: expected a boolean", s.name)));
+            };
+            s.set_vertex(on);
+            return Ok(());
+        }
         let Some(ty) = s.find_param(key).map(|p| p.ty) else {
             return Err(rt(s.set_param(key, &[]).unwrap_err()));
         };
@@ -240,6 +248,16 @@ impl UserData for LuaRender {
         f.add_field_method_set("shadow_distance", |lua, _, v: f32| with(lua, |w| Ok(w.render.shadow_distance = v.max(1.0))));
         f.add_field_method_get("shadow_size", |lua, _| with(lua, |w| Ok(w.render.shadow_size)));
         f.add_field_method_set("shadow_size", |lua, _, v: f32| with(lua, |w| Ok(w.render.shadow_size = v.clamp(256.0, 8192.0) as u32)));
+        f.add_field_method_get("light_shadows", |lua, _| with(lua, |w| Ok(w.render.light_shadows)));
+        f.add_field_method_set("light_shadows", |lua, _, v: f32| {
+            with(lua, |w| Ok(w.render.light_shadows = v.clamp(0.0, spark_core::Light::MAX_SHADOWED as f32) as u32))
+        });
+        f.add_field_method_get("light_shadow_soft", |lua, _| with(lua, |w| Ok(w.render.light_shadow_soft)));
+        f.add_field_method_set("light_shadow_soft", |lua, _, v: bool| with(lua, |w| Ok(w.render.light_shadow_soft = v)));
+        f.add_field_method_get("light_shadow_size", |lua, _| with(lua, |w| Ok(w.render.light_shadow_size)));
+        f.add_field_method_set("light_shadow_size", |lua, _, v: f32| with(lua, |w| Ok(w.render.light_shadow_size = v.clamp(64.0, 2048.0) as u32)));
+        f.add_field_method_get("light_shadow_updates", |lua, _| with(lua, |w| Ok(w.render.light_shadow_updates)));
+        f.add_field_method_set("light_shadow_updates", |lua, _, v: f32| with(lua, |w| Ok(w.render.light_shadow_updates = v.max(0.0) as u32)));
         f.add_field_method_get("filter", |lua, _| with(lua, |w| Ok(filter_name(w.render.filter))));
         f.add_field_method_set("filter", |lua, _, v: Value| {
             let f = to_filter(&v, "graphics.filter")?;

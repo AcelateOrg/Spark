@@ -15,6 +15,8 @@ var<private> object: Object;
 // Sun shadow map (see `sun_shadow`).
 @group(0) @binding(1) var spark_shadow_map: texture_depth_2d;
 @group(0) @binding(2) var spark_shadow_sampler: sampler_comparison;
+// Shadow cubes of point / spot lights with `shadows = true`, six layers per light (see `light_shadow`).
+@group(0) @binding(5) var spark_light_shadow_map: texture_depth_2d_array;
 @group(2) @binding(0) var base_texture: texture_2d<f32>;
 @group(2) @binding(1) var base_sampler: sampler;
 // Material normal map (a flat 1x1 map when the material has none). See `surface_normal`.
@@ -80,6 +82,50 @@ fn sun_shadow(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     return mix(sum / 9.0, 1.0, fade);
 }
 
+// How much of light `i` (an index into frame.lights) reaches a point: 1 = lit, 0 = in shadow.
+// Lights without a shadow map (light.shadows = false, or beyond graphics.light_shadows) always return 1.
+// Safe in non-uniform control flow (inside the light loop).
+fn light_shadow(i: u32, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let li = frame.lights[i];
+    if (frame.light_shadow.x < 0.5 || li.params.y < 0.5) {
+        return 1.0;
+    }
+    // normal offset of ~1.5 texels at this distance (a 90 degree face spans 2 * distance)
+    let texel = frame.light_shadow.y;
+    let p = world_pos + normalize(normal) * (3.0 * texel * distance(world_pos, li.position.xyz));
+    let d = p - li.position.xyz;
+    let a = abs(d);
+    var face = 0u;
+    if (a.x >= a.y && a.x >= a.z) {
+        face = select(1u, 0u, d.x > 0.0);
+    } else if (a.y >= a.z) {
+        face = select(3u, 2u, d.y > 0.0);
+    } else {
+        face = select(5u, 4u, d.z > 0.0);
+    }
+    let layer = (u32(li.params.y + 0.5) - 1u) * 6u + face;
+    let c4 = frame.light_shadow_view_proj[layer] * vec4<f32>(p, 1.0);
+    let c = c4.xyz / c4.w;
+    let uv = vec2<f32>(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5);
+    var sum = 0.0;
+    if (frame.light_shadow.z < 0.5) {
+        // graphics.light_shadow_soft = false: 4 bilinear compares (2x2 texels each) ~1.5 texels apart
+        for (var k = 0u; k < 4u; k = k + 1u) {
+            let off = vec2<f32>(f32(k & 1u) - 0.5, f32(k >> 1u) - 0.5) * 1.5 * texel;
+            let o = clamp(uv + off, vec2<f32>(texel * 0.5), vec2<f32>(1.0 - texel * 0.5));
+            sum = sum + textureSampleCompareLevel(spark_light_shadow_map, spark_shadow_sampler, o, layer, c.z - 0.00015);
+        }
+        return sum / 4.0;
+    }
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let o = clamp(uv + vec2<f32>(f32(x), f32(y)) * texel, vec2<f32>(texel * 0.5), vec2<f32>(1.0 - texel * 0.5));
+            sum = sum + textureSampleCompareLevel(spark_light_shadow_map, spark_shadow_sampler, o, layer, c.z - 0.00015);
+        }
+    }
+    return sum / 9.0;
+}
+
 // Light arriving at a point: ambient + sun (with shadows) + point / spot lights (linear rgb).
 fn lighting(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let n = normalize(normal);
@@ -104,7 +150,11 @@ fn lighting(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
             att = att * smoothstep(li.direction.w, li.params.x, dot(-ldir, li.direction.xyz));
         }
         let lambert = clamp((dot(n, ldir) + 0.15) / 1.15, 0.0, 1.0);
-        light = light + li.color.rgb * att * lambert;
+        // the cube lookup (9 taps) is the most expensive part of a light: only where it can change the result
+        if (att * lambert <= 0.0) {
+            continue;
+        }
+        light = light + li.color.rgb * att * lambert * light_shadow(i, world_pos, n);
     }
     return light;
 }
@@ -208,7 +258,10 @@ fn pbr_lighting(world_pos: vec3<f32>, normal: vec3<f32>, base: vec3<f32>, metall
         if (li.color.w > 0.5) {
             att = att * smoothstep(li.direction.w, li.params.x, dot(-ldir, li.direction.xyz));
         }
-        rgb = rgb + pbr_direct(n, v, ldir, li.color.rgb * att, base, m, r);
+        if (att <= 0.0 || dot(n, ldir) <= 0.0) {
+            continue;
+        }
+        rgb = rgb + pbr_direct(n, v, ldir, li.color.rgb * att * light_shadow(i, world_pos, n), base, m, r);
     }
     return rgb;
 }
