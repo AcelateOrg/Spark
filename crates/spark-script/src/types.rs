@@ -36,7 +36,51 @@ pub(crate) fn set_parent(w: &mut World, id: ObjectId, parent: Option<ObjectId>) 
     w.scene.set_parent(id, parent).map_err(rt)
 }
 
-const PROPS: &str = "name, position, rotation, scale, visible, parent, color, shader, data, body, light";
+const PROPS: &str =
+    "name, position, rotation, scale, visible, parent, color, shader, data, body, light, blend, double_sided, cast_shadow, pbr, metallic, roughness, emissive, normal_map, lod";
+
+/// `nil` / `false` -> none, else a Texture or an image path.
+fn to_normal_map(w: &mut World, v: &Value, what: &str) -> LuaResult<Option<TextureId>> {
+    match v {
+        Value::Nil | Value::Boolean(false) => Ok(None),
+        _ => crate::draw::texture_of(w, v, what).map(Some),
+    }
+}
+
+/// `{ {distance, mesh}, ... }` -> LOD levels.
+fn to_lod(v: &Value, what: &str) -> LuaResult<Vec<(f32, MeshId)>> {
+    let bad = || rt(format!("{what}: expected a list of {{distance, Mesh}} pairs, e.g. {{ {{20, mid}}, {{60, low}} }}"));
+    let t = match v {
+        Value::Nil => return Ok(Vec::new()),
+        Value::Table(t) => t,
+        _ => return Err(bad()),
+    };
+    let mut out = Vec::new();
+    for level in t.sequence_values::<Value>() {
+        let Value::Table(pair) = level? else { return Err(bad()) };
+        let d: Value = pair.get(1)?;
+        let m: Value = pair.get(2)?;
+        let d = to_num(&d, what)?;
+        let Value::UserData(ud) = m else { return Err(bad()) };
+        let mesh = ud.borrow::<LuaMesh>().map_err(|_| bad())?.0;
+        if !(d >= 0.0) {
+            return Err(rt(format!("{what}: distances must be 0 or more, got {d}")));
+        }
+        out.push((d, mesh));
+    }
+    Ok(out)
+}
+
+fn lod_table(lua: &Lua, lod: &[(f32, MeshId)]) -> LuaResult<Table> {
+    let t = lua.create_table()?;
+    for (d, m) in lod {
+        let pair = lua.create_table()?;
+        pair.push(*d)?;
+        pair.push(LuaMesh(*m))?;
+        t.push(pair)?;
+    }
+    Ok(t)
+}
 
 /// `material.data`: up to 4 numbers, a vector or {x, y, z, w}.
 pub(crate) fn to_data(args: &[Value], what: &str) -> LuaResult<[f32; 4]> {
@@ -88,18 +132,37 @@ pub(crate) fn apply_props(w: &mut World, id: ObjectId, props: Option<Table>) -> 
         let (k, v) = pair?;
         let what = format!("property '{k}'");
         match k.as_str() {
-            "name" => w.scene[id].name = to_str(&v, &what)?,
-            "position" => w.scene[id].position = to_vec3(&v, &what)?,
-            "rotation" => w.scene[id].rotation = from_euler(to_vec3(&v, &what)?),
-            "scale" => w.scene[id].scale = to_scale(&v, &what)?,
-            "visible" => w.scene[id].visible = to_bool(&v, &what)?,
-            "color" => w.scene[id].material.color = to_color(&v, &what)?,
-            "shader" => w.scene[id].material.shader = crate::shader::to_shader(&v, &what)?,
-            "data" => w.scene[id].material.data = to_data(&[v], &what)?,
+            // set_parent needs &mut World, so handle it before borrowing the object.
             "parent" => set_parent(w, id, to_parent(&v, &what)?)?,
-            "body" => w.scene[id].body = Some(crate::physics::to_body(&v, &what)?),
-            "light" => w.scene[id].light = Some(crate::light::to_light(&v, &what)?),
-            _ => return Err(rt(format!("unknown property '{k}' (allowed: {PROPS})"))),
+            // may load a texture: needs the whole world too
+            "normal_map" => {
+                let t = to_normal_map(w, &v, &what)?;
+                w.scene.get_mut(id).ok_or_else(dead)?.material.normal_map = t;
+            }
+            _ => {
+                let o = w.scene.get_mut(id).ok_or_else(dead)?;
+                match k.as_str() {
+                    "name" => o.name = to_str(&v, &what)?,
+                    "position" => o.position = to_vec3(&v, &what)?,
+                    "rotation" => o.rotation = from_euler(to_vec3(&v, &what)?),
+                    "scale" => o.scale = to_scale(&v, &what)?,
+                    "visible" => o.visible = to_bool(&v, &what)?,
+                    "color" => o.material.color = to_color(&v, &what)?,
+                    "shader" => o.material.shader = crate::shader::to_shader(&v, &what)?,
+                    "data" => o.material.data = to_data(&[v], &what)?,
+                    "blend" => o.material.blend = to_blend(&v, &what)?,
+                    "double_sided" => o.material.double_sided = to_bool(&v, &what)?,
+                    "cast_shadow" => o.material.cast_shadow = to_bool(&v, &what)?,
+                    "pbr" => o.material.pbr = to_bool(&v, &what)?,
+                    "metallic" => o.material = o.material.with_metallic(to_num(&v, &what)?),
+                    "roughness" => o.material = o.material.with_roughness(to_num(&v, &what)?),
+                    "emissive" => o.material.emissive = to_color(&v, &what)?,
+                    "lod" => o.lod = to_lod(&v, &what)?,
+                    "body" => o.body = Some(crate::physics::to_body(&v, &what)?),
+                    "light" => o.light = Some(crate::light::to_light(&v, &what)?),
+                    _ => return Err(rt(format!("unknown property '{k}' (allowed: {PROPS})"))),
+                }
+            }
         }
     }
     Ok(())
@@ -142,6 +205,43 @@ impl UserData for Obj {
             write(lua, this.0, |o| o.material.color = c)
         });
         f.add_field_method_get("material", |lua, this| read(lua, this.0, |_, o| LuaMaterial(o.material)));
+        f.add_field_method_get("blend", |lua, this| read(lua, this.0, |_, o| o.material.blend.name()));
+        f.add_field_method_set("blend", |lua, this, v: Value| {
+            let b = to_blend(&v, "blend")?;
+            write(lua, this.0, |o| o.material.blend = b)
+        });
+        f.add_field_method_get("double_sided", |lua, this| read(lua, this.0, |_, o| o.material.double_sided));
+        f.add_field_method_set("double_sided", |lua, this, v: bool| write(lua, this.0, |o| o.material.double_sided = v));
+        f.add_field_method_get("cast_shadow", |lua, this| read(lua, this.0, |_, o| o.material.cast_shadow));
+        f.add_field_method_set("cast_shadow", |lua, this, v: bool| write(lua, this.0, |o| o.material.cast_shadow = v));
+        f.add_field_method_get("pbr", |lua, this| read(lua, this.0, |_, o| o.material.pbr));
+        f.add_field_method_set("pbr", |lua, this, v: bool| write(lua, this.0, |o| o.material.pbr = v));
+        f.add_field_method_get("metallic", |lua, this| read(lua, this.0, |_, o| o.material.metallic));
+        f.add_field_method_set("metallic", |lua, this, v: f32| write(lua, this.0, |o| o.material = o.material.with_metallic(v)));
+        f.add_field_method_get("roughness", |lua, this| read(lua, this.0, |_, o| o.material.roughness));
+        f.add_field_method_set("roughness", |lua, this, v: f32| write(lua, this.0, |o| o.material = o.material.with_roughness(v)));
+        f.add_field_method_get("emissive", |lua, this| read(lua, this.0, |_, o| LuaColor(o.material.emissive)));
+        f.add_field_method_set("emissive", |lua, this, v: Value| {
+            let c = to_color(&v, "emissive")?;
+            write(lua, this.0, |o| o.material.emissive = c)
+        });
+        f.add_field_method_get("normal_map", |lua, this| read(lua, this.0, |_, o| o.material.normal_map.map(LuaTexture)));
+        f.add_field_method_set("normal_map", |lua, this, v: Value| {
+            let id = this.0;
+            with(lua, |w| {
+                let t = to_normal_map(w, &v, "normal_map")?;
+                w.scene.get_mut(id).ok_or_else(dead)?.material.normal_map = t;
+                Ok(())
+            })
+        });
+        f.add_field_method_get("lod", |lua, this| {
+            let lod = read(lua, this.0, |_, o| o.lod.clone())?;
+            lod_table(lua, &lod)
+        });
+        f.add_field_method_set("lod", |lua, this, v: Value| {
+            let lod = to_lod(&v, "lod")?;
+            write(lua, this.0, |o| o.lod = lod)
+        });
         f.add_field_method_get("shader", |lua, this| read(lua, this.0, |_, o| o.material.shader.map(crate::shader::LuaShader)));
         f.add_field_method_set("shader", |lua, this, v: Value| {
             let s = crate::shader::to_shader(&v, "shader")?;
@@ -207,7 +307,7 @@ impl UserData for Obj {
                     Some(p) => w.scene.world_matrix(p).inverse().transform_point3(t),
                     None => t,
                 };
-                w.scene[this.0].look_at(local);
+                w.scene.get_mut(this.0).ok_or_else(dead)?.look_at(local);
                 Ok(())
             })
         });
@@ -315,11 +415,35 @@ impl UserData for LuaMaterial {
         f.add_field_method_get("texture", |_, this| Ok(this.0.texture.map(LuaTexture)));
         f.add_field_method_get("shader", |_, this| Ok(this.0.shader.map(crate::shader::LuaShader)));
         f.add_field_method_get("data", |lua, this| data_table(lua, this.0.data));
+        f.add_field_method_get("blend", |_, this| Ok(this.0.blend.name()));
+        f.add_field_method_get("double_sided", |_, this| Ok(this.0.double_sided));
+        f.add_field_method_get("cast_shadow", |_, this| Ok(this.0.cast_shadow));
+        f.add_field_method_get("pbr", |_, this| Ok(this.0.pbr));
+        f.add_field_method_get("metallic", |_, this| Ok(this.0.metallic));
+        f.add_field_method_get("roughness", |_, this| Ok(this.0.roughness));
+        f.add_field_method_get("emissive", |_, this| Ok(LuaColor(this.0.emissive)));
+        f.add_field_method_get("normal_map", |_, this| Ok(this.0.normal_map.map(LuaTexture)));
     }
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
         m.add_method("tiling", |_, this, (x, y): (f32, Option<f32>)| Ok(LuaMaterial(this.0.with_tiling(x, y.unwrap_or(x)))));
         m.add_method("with_color", |_, this, c: Value| Ok(LuaMaterial(this.0.with_color(to_color(&c, "with_color")?))));
+        m.add_method("with_blend", |_, this, v: Value| Ok(LuaMaterial(this.0.with_blend(to_blend(&v, "with_blend")?))));
+        m.add_method("with_double_sided", |_, this, on: Option<bool>| {
+            Ok(LuaMaterial(this.0.with_double_sided(on.unwrap_or(true))))
+        });
+        m.add_method("with_cast_shadow", |_, this, on: Option<bool>| {
+            let mut m = this.0;
+            m.cast_shadow = on.unwrap_or(true);
+            Ok(LuaMaterial(m))
+        });
         m.add_method("with_unlit", |_, this, on: Option<bool>| Ok(LuaMaterial(this.0.with_unlit(on.unwrap_or(true)))));
+        m.add_method("with_metallic", |_, this, v: f32| Ok(LuaMaterial(this.0.with_metallic(v))));
+        m.add_method("with_roughness", |_, this, v: f32| Ok(LuaMaterial(this.0.with_roughness(v))));
+        m.add_method("with_emissive", |_, this, c: Value| Ok(LuaMaterial(this.0.with_emissive(to_color(&c, "with_emissive")?))));
+        m.add_method("with_normal_map", |lua, this, v: Value| {
+            let t = with(lua, |w| to_normal_map(w, &v, "with_normal_map"))?;
+            Ok(LuaMaterial(this.0.with_normal_map(t)))
+        });
         m.add_method("with_shader", |_, this, s: Value| {
             Ok(LuaMaterial(this.0.with_shader(crate::shader::to_shader(&s, "with_shader")?)))
         });
@@ -362,6 +486,15 @@ impl UserData for Cam {
         f.add_field_method_set("near", |lua, _, v: f32| with(lua, |w| Ok(w.scene.camera.near = v)));
         f.add_field_method_get("far", |lua, _| with(lua, |w| Ok(w.scene.camera.far)));
         f.add_field_method_set("far", |lua, _, v: f32| with(lua, |w| Ok(w.scene.camera.far = v)));
+        // nil / false = perspective, a number = orthographic with that many meters visible vertically.
+        f.add_field_method_get("ortho", |lua, _| with(lua, |w| Ok(w.scene.camera.ortho)));
+        f.add_field_method_set("ortho", |lua, _, v: Value| {
+            let o = match v {
+                Value::Nil | Value::Boolean(false) => None,
+                _ => Some(to_num(&v, "camera.ortho")?.max(0.001)),
+            };
+            with(lua, |w| Ok(w.scene.camera.ortho = o))
+        });
     }
     fn add_methods<M: UserDataMethods<Self>>(m: &mut M) {
         m.add_method("look_at", |lua, _, target: Value| {
@@ -376,6 +509,28 @@ impl UserData for Cam {
             with(lua, |w| Ok(w.scene.camera.position += d))
         });
         m.add_method("forward", |lua, _, ()| with(lua, |w| Ok(vv(w.scene.camera.forward()))));
+        // World point -> screen pixel (x, y, depth 0..1) or nil when behind the camera.
+        m.add_method("world_to_screen", |lua, _, p: Value| {
+            with(lua, |w| {
+                let p = to_point(w, &p, "camera:world_to_screen")?;
+                let (sw, sh) = w.canvas.output_size();
+                Ok(w.scene
+                    .camera
+                    .world_to_screen(p, spark_core::Vec2::new(sw as f32, sh as f32))
+                    .map(|(px, d)| mlua::Variadic::from_iter([px.x, px.y, d]))
+                    .unwrap_or_default())
+            })
+        });
+        // Screen pixel (default: the mouse) -> origin, direction of a world ray.
+        m.add_method("screen_to_ray", |lua, _, (x, y): (Option<f32>, Option<f32>)| {
+            with(lua, |w| {
+                let (sw, sh) = w.canvas.output_size();
+                let m = w.input.mouse_position;
+                let px = spark_core::Vec2::new(x.unwrap_or(m.x), y.unwrap_or(m.y));
+                let (o, d) = w.scene.camera.screen_to_ray(px, spark_core::Vec2::new(sw as f32, sh as f32));
+                Ok((vv(o), vv(d)))
+            })
+        });
         m.add_method("right", |lua, _, ()| with(lua, |w| Ok(vv(w.scene.camera.right()))));
         m.add_method("up", |lua, _, ()| with(lua, |w| Ok(vv(w.scene.camera.up()))));
         m.add_meta_method(MetaMethod::ToString, |lua, _, ()| {
@@ -413,4 +568,10 @@ impl UserData for TimeRef {
         f.add_field_method_get("frame", |lua, _| with(lua, |w| Ok(w.time.frame)));
         f.add_field_method_get("fps", |lua, _| with(lua, |w| Ok(w.time.fps)));
     }
+}
+
+pub(crate) fn to_blend(v: &Value, what: &str) -> LuaResult<spark_core::material::BlendMode> {
+    let s = to_str(v, what)?;
+    spark_core::material::BlendMode::parse(&s)
+        .ok_or_else(|| rt(format!("{what}: unknown blend mode '{s}' (allowed: auto, opaque, alpha, additive)")))
 }

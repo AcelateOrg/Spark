@@ -8,10 +8,13 @@
 #   SPARK_BIN     = C:\tools   install into this folder
 #   SPARK_NO_PATH = 1          do not touch PATH
 #   SPARK_ZIP     = file.zip   install from a local spark-windows-x64.zip (testing)
+#   SPARK_REPO    = owner/repo download from a fork (default AcelateOrg/Spark)
+#
+# Linux / macOS: curl -fsSL https://raw.githubusercontent.com/AcelateOrg/Spark/main/install.sh | sh
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$repo = 'AcelateOrg/Spark'
+$repo = if ($env:SPARK_REPO) { $env:SPARK_REPO } else { 'AcelateOrg/Spark' }
 $assetName = 'spark-windows-x64.zip'
 
 $bin = if ($env:SPARK_BIN) { $env:SPARK_BIN } else { Join-Path $env:LOCALAPPDATA 'Spark\bin' }

@@ -1,4 +1,4 @@
-name: Build
+name: CI
 
 on:
   push:
@@ -6,24 +6,68 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest, exe: spark.exe }
+          - { name: linux-x64, os: ubuntu-latest, exe: spark }
+          - { name: macos-arm64, os: macos-latest, exe: spark }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --release -p spark-cli
-
-      - name: Package
-        shell: pwsh
+      - name: Linux packages
+        if: runner.os == 'Linux'
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/spark.exe, LICENSE, README.md dist/
+          sudo apt-get update
+          # audio (alsa, dbus via cpal), gamepads (udev), keyboard (xkbcommon), software Vulkan for headless tests
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libdbus-1-dev pkg-config mesa-vulkan-drivers
+
+      # cargo fmt --check is not run: the code base uses a wider, hand-kept layout than rustfmt's default
+      # and there is no rustfmt.toml yet. Enable this step once `cargo fmt --all` has been applied repo-wide.
+      # - run: cargo fmt --all --check
+
+      # Lints that pre-existing code still triggers are allowed here (not in the code) so that new warnings fail CI.
+      # Remove an -A once its crate is clean: assign_op_pattern (core canvas, physics), collapsible_str_replace,
+      # len_without_is_empty, needless_range_loop (core shader, render), empty_line_after_doc_comments (render),
+      # field_reassign_with_default (core time), items_after_test_module (core audio), manual_range_contains and
+      # unit_arg (script), neg_cmp_op_on_partial_ord (core pick), too_many_arguments (physics), useless_format (spark app).
+      - name: Clippy
+        shell: bash
+        run: >
+          cargo clippy --workspace --all-targets -- -D warnings
+          -A clippy::assign_op_pattern -A clippy::collapsible_str_replace -A clippy::empty_line_after_doc_comments
+          -A clippy::field_reassign_with_default -A clippy::items_after_test_module -A clippy::len_without_is_empty
+          -A clippy::manual_range_contains -A clippy::needless_range_loop -A clippy::neg_cmp_op_on_partial_ord
+          -A clippy::too_many_arguments -A clippy::unit_arg -A clippy::useless_format
+
+      - name: Build
+        run: cargo build --release --workspace
+
+      - name: Test
+        run: cargo test --release --workspace
+
+      - name: spark check (template game)
+        shell: bash
+        run: |
+          target/release/${{ matrix.exe }} new "$RUNNER_TEMP/ci-game"
+          target/release/${{ matrix.exe }} check "$RUNNER_TEMP/ci-game" --frames 120 --json
 
       - uses: actions/upload-artifact@v4
         with:
-          name: spark-windows-x64
-          path: dist/
+          name: spark-${{ matrix.name }}
+          path: |
+            target/release/${{ matrix.exe }}
+            LICENSE
+            README.md

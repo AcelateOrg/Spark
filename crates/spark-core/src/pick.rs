@@ -56,7 +56,7 @@ impl World {
             }
             cur = self.scene.get(c).and_then(|o| o.parent);
             depth += 1;
-            if depth > 64 {
+            if depth > self.scene.capacity() {
                 break;
             }
         }
@@ -72,8 +72,11 @@ impl World {
         }
         let inv_d = d.recip();
         let mut cands: Vec<(f32, ObjectId)> = Vec::new();
+        // World matrices + visibility of everything in one O(n) pass.
+        let (mut mats, mut vis) = (Vec::new(), Vec::new());
+        self.scene.compute_world_transforms(1.0, &mut mats, &mut vis);
         for (id, o) in self.scene.iter() {
-            if o.mesh.is_none() || !self.scene.is_visible(id) {
+            if o.mesh.is_none() || !vis[id.index() as usize] {
                 continue;
             }
             if let Some(ig) = ignore {
@@ -81,7 +84,7 @@ impl World {
                     continue;
                 }
             }
-            let b = self.scene.world_bounds(id);
+            let b = o.local_bounds().transform(&mats[id.index() as usize]);
             if b.is_empty() {
                 continue;
             }
@@ -101,7 +104,7 @@ impl World {
                 break;
             }
             let Some(mesh) = self.scene.get(id).and_then(|o| o.mesh).and_then(|m| self.assets.mesh(m)) else { continue };
-            let m = self.scene.world_matrix(id);
+            let m = mats[id.index() as usize];
             if m.determinant().abs() < 1e-12 {
                 continue;
             }

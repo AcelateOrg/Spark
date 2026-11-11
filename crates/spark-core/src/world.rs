@@ -39,7 +39,12 @@ pub struct World {
     pub animator: Animator,
     /// Fullscreen / title requests for the window (ignored in headless runs).
     pub window: WindowSettings,
+    /// Debug overlay (FPS, GPU, scene stats). Toggle with F1 in the runner.
+    pub debug: crate::debug::DebugOverlay,
+    /// Immediate-mode UI state (buttons, sliders, panels).
+    pub ui: crate::ui::Ui,
     quit: bool,
+    restart: bool,
 }
 
 impl World {
@@ -84,6 +89,16 @@ impl World {
         self.quit
     }
 
+    /// Ask the script host to restart the game (scene cleared, `start()` runs again) at the next frame.
+    pub fn request_restart(&mut self) {
+        self.restart = true;
+    }
+
+    /// True once after `request_restart` (the script host consumes it).
+    pub fn take_restart(&mut self) -> bool {
+        std::mem::take(&mut self.restart)
+    }
+
     /// Clears scene, assets, render settings, bodies and sounds (keeps input, time, backends and asset root).
     /// Used by hot reload.
     pub fn reset(&mut self) {
@@ -92,9 +107,12 @@ impl World {
         self.physics.gravity = Physics::default().gravity;
         self.physics.enabled = true;
         self.audio.stop_all(0.0);
+        self.audio.clear_cache();
         self.assets.clear();
         self.animator.clear();
         self.render = RenderSettings::default();
         self.canvas.reset();
+        self.debug = crate::debug::DebugOverlay::default();
+        self.ui = crate::ui::Ui::default();
     }
 }

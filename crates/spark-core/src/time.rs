@@ -51,6 +51,13 @@ impl Time {
         self.frame += 1;
     }
 
+    /// How far the current frame is between the last fixed step and the next one (0..1).
+    /// The renderer uses it to interpolate simulated bodies, so motion stays smooth when the
+    /// refresh rate differs from the fixed rate (144 Hz monitor, 60 Hz physics).
+    pub fn alpha(&self) -> f32 {
+        (self.fixed_accumulator / self.fixed_dt.max(1e-4)).clamp(0.0, 1.0)
+    }
+
     /// How many `fixed_update` steps to run this frame (consumes the accumulator).
     pub fn fixed_steps(&mut self) -> u32 {
         let step = self.fixed_dt.max(1e-4);

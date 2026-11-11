@@ -16,15 +16,20 @@
 mod api;
 mod audio;
 mod convert;
+mod debug_api;
+mod discord;
 mod draw;
+pub mod error_screen;
 mod flow;
 mod light;
+mod ui_api;
 mod model;
 mod modules;
 mod physics;
 mod runtime;
 mod save;
 mod shader;
+pub mod testing;
 mod tween;
 mod types;
 
@@ -35,8 +40,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use mlua::{ErrorContext, Function, Lua, MultiValue, Value};
-use spark_core::{Align, Color, Game, Layer, TextParams, Vec2, World};
+use spark_core::{Game, World};
 
+pub use runtime::TaskStatus;
 pub use save::default_save_path;
 
 use convert::Shared;
@@ -66,6 +72,23 @@ pub struct ScriptGame {
     shader_error: Option<String>,
     /// Files loaded with `require` by the current run (hot reload).
     modules: Option<modules::SharedModules>,
+    /// Max time one callback may run before it is stopped with an error (infinite loop guard).
+    timeout: std::time::Duration,
+    /// Deadline of the callback running now (checked by the Luau interrupt).
+    deadline: Rc<std::cell::Cell<Option<Instant>>>,
+    /// Scenario test run next to the game (`spark test`).
+    test: Option<TestRun>,
+    /// What the error screen shows (built once per error).
+    error_view: Option<error_screen::ErrorView>,
+    shader_view: Option<error_screen::ErrorView>,
+}
+
+struct TestRun {
+    path: PathBuf,
+    /// Name used in error locations, e.g. `tests/bridge.luau`.
+    name: String,
+    shared: testing::SharedTest,
+    status: Option<Rc<std::cell::Cell<TaskStatus>>>,
 }
 
 impl ScriptGame {
@@ -84,7 +107,50 @@ impl ScriptGame {
             shader_mtimes: HashMap::new(),
             shader_error: None,
             modules: None,
+            timeout: std::time::Duration::from_secs(5),
+            deadline: Rc::default(),
+            test: None,
+            error_view: None,
+            shader_view: None,
         }
+    }
+
+    fn root(&self) -> PathBuf {
+        self.path.parent().map(Path::to_path_buf).unwrap_or_default()
+    }
+
+    /// Runs the scenario test `path` as a task next to the game (installs the `test` global).
+    /// `name` is how the file shows up in errors (e.g. `tests/bridge.luau`).
+    pub fn test(mut self, path: impl Into<PathBuf>, name: impl Into<String>) -> Self {
+        self.test = Some(TestRun { path: path.into(), name: name.into(), shared: Rc::default(), status: None });
+        self
+    }
+
+    /// State of the test task: `None` before it started, `Done` = passed, `Failed` = see [`Self::error`].
+    pub fn test_status(&self) -> Option<TaskStatus> {
+        self.test.as_ref().and_then(|t| t.status.as_ref()).map(|s| s.get())
+    }
+
+    /// Input the test queued since the last call (apply it before the next frame).
+    pub fn take_test_input(&mut self) -> Vec<testing::TestInput> {
+        self.test.as_ref().map(|t| std::mem::take(&mut t.shared.borrow_mut().input)).unwrap_or_default()
+    }
+
+    /// Snapshots recorded with `test.snapshot(name)`, in order.
+    pub fn test_snapshots(&self) -> Vec<(String, String)> {
+        self.test.as_ref().map(|t| t.shared.borrow().snapshots.clone()).unwrap_or_default()
+    }
+
+    /// Last `test.step(...)` name.
+    pub fn test_step(&self) -> Option<String> {
+        self.test.as_ref().and_then(|t| t.shared.borrow().step.clone())
+    }
+
+    /// Max run time of one script callback (default 5 s). A `while true do end` then stops with
+    /// a clear error instead of freezing the game. `None` = no limit.
+    pub fn timeout(mut self, limit: Option<std::time::Duration>) -> Self {
+        self.timeout = limit.unwrap_or(std::time::Duration::MAX);
+        self
     }
 
     /// Exit the process with code 1 on the first script error (for headless / CI / AI runs).
@@ -124,6 +190,11 @@ impl ScriptGame {
         if let Some(dir) = self.path.parent() {
             let _ = std::fs::write(dir.join("error.log"), format!("{msg}\n"));
         }
+        let file = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let hint = format!(
+            "Fix the error and save the file ({file} or a module): the game reloads automatically.   F5 - restart   |   full text: error.log"
+        );
+        self.error_view = Some(error_screen::ErrorView::new("Script error", &msg, &self.root(), &hint));
         self.error = Some(msg);
     }
 
@@ -134,7 +205,9 @@ impl ScriptGame {
         }
         let Some(lua) = self.lua.clone() else { return };
         std::mem::swap(world, &mut self.shared.borrow_mut());
+        self.deadline.set(Instant::now().checked_add(self.timeout));
         let result = f(&lua);
+        self.deadline.set(None);
         std::mem::swap(world, &mut self.shared.borrow_mut());
         if let Err(e) = result {
             self.fail(e.to_string());
@@ -143,6 +216,9 @@ impl ScriptGame {
 
     fn drop_lua(&mut self) {
         if let Some(old) = self.lua.take() {
+            if let Err(e) = save::flush(&old) {
+                log::error!("{e}");
+            }
             // Release every function / coroutine reference before the state goes away.
             if let Some(rt) = old.remove_app_data::<SharedRuntime>() {
                 rt.borrow_mut().clear();
@@ -153,6 +229,7 @@ impl ScriptGame {
     fn load(&mut self, world: &mut World) {
         self.drop_lua();
         self.error = None;
+        self.error_view = None;
         self.modified = modified(&self.path);
         self.frame_started = world.time.frame;
         world.reset();
@@ -166,6 +243,20 @@ impl ScriptGame {
         self.modules = Some(modules.clone());
         let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "main.luau".into());
         let lua = Lua::new();
+        let deadline = self.deadline.clone();
+        let limit = self.timeout;
+        lua.set_interrupt(move |_| {
+            if deadline.get().is_some_and(|d| Instant::now() > d) {
+                // The deadline stays set: a `pcall` around the loop cannot swallow the error, every
+                // later check fails too until the callback returns (`run` then clears it).
+                return Err(mlua::Error::runtime(format!(
+                    "script ran for more than {:.1} s without returning (infinite loop?). \
+                     Long work: split it over frames with wait() / task.spawn",
+                    limit.as_secs_f32()
+                )));
+            }
+            Ok(mlua::VmState::Continue)
+        });
         lua.set_app_data(Shared(self.shared.clone()));
         lua.set_app_data::<SharedRuntime>(Rc::default());
         lua.set_app_data(save::SavePath(self.save_path.clone()));
@@ -185,6 +276,7 @@ impl ScriptGame {
             }
             Ok(())
         });
+        self.start_test(world);
         if self.error.is_none() {
             log::info!("script loaded: {}", self.path.display());
             let lines = source.lines().count();
@@ -195,6 +287,34 @@ impl ScriptGame {
                      `return Player` and `local Player = require(\"./src/player\")` (docs/LUAU_API.md, \"Game structure\")"
                 );
             }
+        }
+    }
+
+    /// Starts the scenario test (after the game's `start()` began). A restart of the game during
+    /// a test fails it: the test would start over and loop.
+    fn start_test(&mut self, world: &mut World) {
+        if self.error.is_some() {
+            return;
+        }
+        let Some(t) = &self.test else { return };
+        if t.status.is_some() {
+            return self.fail(format!("{}the game restarted (restart() or a reload) during the test", testing::FAIL_PREFIX));
+        }
+        let source = match spark_core::vfs::read_string(&t.path) {
+            Ok(s) => s,
+            Err(e) => return self.fail(format!("{}: {e}", t.name)),
+        };
+        let (name, shared) = (t.name.clone(), t.shared.clone());
+        let mut status = None;
+        self.run(world, |lua| {
+            testing::install(lua, shared)?;
+            let f = lua.load(source.as_str()).set_name(format!("@{name}")).into_function()?;
+            status = Some(runtime::spawn_task(lua, f, MultiValue::new()).map_err(|e| e.context("in test"))?.status);
+            Ok(())
+        });
+        if let Some(t) = &mut self.test {
+            // Failed right away: still mark it started.
+            t.status = Some(status.unwrap_or_else(|| Rc::new(std::cell::Cell::new(TaskStatus::Failed))));
         }
     }
 
@@ -212,6 +332,7 @@ impl ScriptGame {
             log::info!("reloading {}", changed_module.as_deref().unwrap_or(&self.path).display());
             self.shader_mtimes.clear();
             self.shader_error = None;
+            self.shader_view = None;
             self.load(world);
             return;
         }
@@ -232,9 +353,16 @@ impl ScriptGame {
                         Ok(()) => {
                             log::info!("shader reloaded: {}", path.display());
                             self.shader_error = None;
+                            self.shader_view = None;
                         }
                         Err(e) => {
                             log::error!("{e}");
+                            let hint = "Fix the shader and save it: it reloads automatically (the previous version keeps running).";
+                            let mut v = error_screen::ErrorView::new("Shader error", &e, &self.root(), hint);
+                            if v.parsed.file.is_none() {
+                                v.parsed.file = Some(path.strip_prefix(self.root()).unwrap_or(&path).to_string_lossy().replace('\\', "/"));
+                            }
+                            self.shader_view = Some(v);
                             self.shader_error = Some(e);
                         }
                     }
@@ -249,38 +377,20 @@ impl ScriptGame {
         if self.frame_started == world.time.frame {
             return;
         }
-        self.poll_files(world);
+        if world.take_restart() {
+            // restart() from the script: same as a hot reload, works in shipped builds too
+            log::info!("restart requested by the script");
+            self.shader_mtimes.clear();
+            self.shader_error = None;
+            self.shader_view = None;
+            self.load(world);
+        } else {
+            self.poll_files(world);
+        }
         self.frame_started = world.time.frame;
         let dt = world.time.dt as f64;
         self.run(world, |lua| runtime::begin_frame(lua, dt));
     }
-}
-
-/// Red error screen shown while the script is paused (players see what went wrong without a console).
-fn draw_error(world: &mut World, heading: &str, msg: &str, hint_text: &str) {
-    let c = &mut world.canvas;
-    let prev = c.layer();
-    c.set_layer(Layer::Ui);
-    let size = c.size();
-    let pad = (size.y * 0.05).max(16.0);
-    c.rect(Vec2::ZERO, size, Color::rgba(0.07, 0.01, 0.01, 0.92), Align::TOP_LEFT);
-    let title = TextParams { size: 30.0, color: Color::rgb(1.0, 0.38, 0.32), ..Default::default() };
-    c.text(heading, Vec2::new(pad, pad), &title);
-    let mut text: String = msg.chars().take(2500).collect();
-    if text.len() < msg.len() {
-        text.push_str(" ...");
-    }
-    let body = TextParams { size: 17.0, width: Some(size.x - pad * 2.0), line_height: 1.15, ..Default::default() };
-    c.text(&text, Vec2::new(pad, pad + 48.0), &body);
-    let hint = TextParams {
-        size: 15.0,
-        color: Color::rgb(0.7, 0.66, 0.64),
-        align: Align { x: 0.0, y: 1.0 },
-        width: Some(size.x - pad * 2.0),
-        ..Default::default()
-    };
-    c.text(hint_text, Vec2::new(pad, size.y - pad), &hint);
-    c.set_layer(prev);
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -326,21 +436,33 @@ impl Game for ScriptGame {
     }
 
     fn draw(&mut self, world: &mut World) {
-        if let Some(msg) = &self.error {
-            let file = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let hint = format!("Fix the error and save the file ({file} or a module): the game reloads automatically. (A copy is in error.log.)");
-            draw_error(world, "Script error", msg, &hint);
+        if self.error.is_some() {
+            if world.input.pressed(spark_core::Key::F5) {
+                log::info!("restart (F5 on the error screen)");
+                self.shader_mtimes.clear();
+                self.shader_error = None;
+                self.shader_view = None;
+                self.load(world);
+                return;
+            }
+            if let Some(v) = &self.error_view {
+                error_screen::draw(world, v);
+            }
             return;
         }
         self.run(world, |lua| {
             if let Some(f) = lua.globals().get::<Option<Function>>("render")? {
                 f.call::<()>(()).map_err(|e| e.context("in render()"))?;
             }
-            Ok(())
+            save::flush(lua)
         });
-        if let Some(msg) = &self.shader_error {
-            draw_error(world, "Shader error", msg, "Fix the shader and save it: it reloads automatically (the previous version keeps running).");
+        if let Some(v) = &self.shader_view {
+            error_screen::draw(world, v);
         }
+    }
+
+    fn error(&self) -> Option<&str> {
+        self.error.as_deref().or(self.shader_error.as_deref())
     }
 }
 

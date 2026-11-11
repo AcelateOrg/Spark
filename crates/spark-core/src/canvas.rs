@@ -284,6 +284,11 @@ impl Canvas {
         self.transform
     }
 
+    /// Replaces the current transform (the push / pop stack is unchanged).
+    pub fn set_transform(&mut self, t: Affine2) {
+        self.transform = t;
+    }
+
     pub fn push(&mut self) {
         self.stack.push(self.transform);
     }

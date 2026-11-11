@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 
-use crate::assets::MeshId;
+use crate::assets::{CubemapId, MeshId};
 use crate::camera::Camera;
 use crate::color::Color;
 use crate::material::Material;
@@ -42,6 +42,10 @@ pub struct Object {
     pub rotation: Quat,
     pub scale: Vec3,
     pub mesh: Option<MeshId>,
+    /// Level of detail: `(distance, mesh)` pairs. From `distance` meters away from the camera on
+    /// the renderer draws that mesh instead of `mesh` (the entry with the largest distance that is
+    /// reached wins; order does not matter). Picking, physics and bounds use `mesh`.
+    pub lod: Vec<(f32, MeshId)>,
     pub material: Material,
     pub visible: bool,
     /// Rigid body simulated by the physics backend (`None` = not physical).
@@ -49,7 +53,22 @@ pub struct Object {
     /// Light emitted from the object's position (spot lights shine along -Z).
     pub light: Option<Light>,
     pub(crate) parent: Option<ObjectId>,
+    /// Direct children (kept in sync by `Scene::set_parent` / `destroy`).
+    pub(crate) children: Vec<ObjectId>,
     pub(crate) local_bounds: Aabb,
+    /// Fixed-step interpolation state of simulated bodies (see [`Interp`]).
+    pub(crate) interp: Option<Interp>,
+}
+
+/// Local pose before and after the last fixed (physics) step. The renderer draws the object
+/// in between (`Time::alpha`) so motion is smooth on any refresh rate. Teleports (game code
+/// changing `position` / `rotation`) are detected and drawn without interpolation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Interp {
+    pub prev_position: Vec3,
+    pub prev_rotation: Quat,
+    pub position: Vec3,
+    pub rotation: Quat,
 }
 
 impl Object {
@@ -61,13 +80,45 @@ impl Object {
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
             mesh: None,
+            lod: Vec::new(),
             material: Material::default(),
             visible: true,
             body: None,
             light: None,
             parent: None,
+            children: Vec::new(),
             local_bounds: Aabb::EMPTY,
+            interp: None,
         }
+    }
+
+    /// Mesh drawn at `distance` meters from the camera: the [`Object::lod`] entry with the
+    /// largest distance not above `distance`, or [`Object::mesh`] when none is reached.
+    pub fn mesh_at(&self, distance: f32) -> Option<MeshId> {
+        self.lod
+            .iter()
+            .filter(|(d, _)| *d <= distance)
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, m)| *m)
+            .or(self.mesh)
+    }
+
+    /// Direct children of this object.
+    pub fn child_ids(&self) -> &[ObjectId] {
+        &self.children
+    }
+
+    /// Local matrix drawn this frame: interpolated between the last two fixed steps for
+    /// simulated bodies (`alpha` 0..1), the plain local matrix otherwise.
+    pub fn render_local_matrix(&self, alpha: f32) -> Mat4 {
+        if let Some(i) = &self.interp {
+            if i.position == self.position && i.rotation == self.rotation {
+                let p = i.prev_position.lerp(i.position, alpha);
+                let r = i.prev_rotation.slerp(i.rotation, alpha);
+                return Mat4::from_scale_rotation_translation(self.scale, r, p);
+            }
+        }
+        self.local_matrix()
     }
 
     pub fn parent(&self) -> Option<ObjectId> {
@@ -141,17 +192,21 @@ pub struct Light {
     pub color: Color,
     pub intensity: f32,
     pub range: f32,
+    /// Casts shadows (a cube shadow map, see `RenderSettings::light_shadows`).
+    pub shadows: bool,
 }
 
 impl Light {
-    pub const MAX_VISIBLE: usize = 32;
+    pub const MAX_VISIBLE: usize = 64;
+    /// Upper limit of `RenderSettings::light_shadows`.
+    pub const MAX_SHADOWED: usize = 8;
 
     pub fn point(color: Color, intensity: f32, range: f32) -> Self {
-        Self { kind: LightKind::Point, color, intensity, range }
+        Self { kind: LightKind::Point, color, intensity, range, shadows: false }
     }
 
     pub fn spot(color: Color, intensity: f32, range: f32, angle: f32, softness: f32) -> Self {
-        Self { kind: LightKind::Spot { angle, softness }, color, intensity, range }
+        Self { kind: LightKind::Spot { angle, softness }, color, intensity, range, shadows: false }
     }
 }
 
@@ -172,6 +227,48 @@ pub struct Fog {
     pub far: f32,
 }
 
+/// Sky drawn behind every object (instead of the flat `background` color). It can also light
+/// the scene (image-based lighting): see [`Sky::lighting`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sky {
+    /// Color straight up; the sky fades to `bottom` straight down (the horizon is halfway).
+    pub top: Color,
+    /// Color straight down.
+    pub bottom: Color,
+    /// Optional cubemap (photo or painted sky), drawn over the gradient.
+    pub cubemap: Option<CubemapId>,
+    /// How much of the cubemap covers the gradient, 0..1.
+    pub blend: f32,
+    /// Image-based lighting strength. 0 = off (objects use the flat `ambient` color);
+    /// above 0 the sky replaces the ambient light (blue from above, ground color from below)
+    /// and PBR surfaces reflect it.
+    pub lighting: f32,
+}
+
+impl Sky {
+    /// Two-color gradient sky.
+    pub fn gradient(top: Color, bottom: Color) -> Self {
+        Self { top, bottom, cubemap: None, blend: 1.0, lighting: 0.0 }
+    }
+
+    /// Cubemap sky (see [`crate::Assets::load_cubemap`]).
+    pub fn cubemap(cubemap: CubemapId) -> Self {
+        Self { cubemap: Some(cubemap), ..Self::default() }
+    }
+
+    /// Sets the image-based lighting strength (0 = off).
+    pub fn with_lighting(mut self, lighting: f32) -> Self {
+        self.lighting = lighting.max(0.0);
+        self
+    }
+}
+
+impl Default for Sky {
+    fn default() -> Self {
+        Self::gradient(Color::rgb(0.38, 0.62, 0.92), Color::rgb(0.22, 0.2, 0.18))
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Slot {
     generation: u32,
@@ -189,6 +286,8 @@ pub struct Scene {
     pub ambient: Color,
     pub background: Color,
     pub fog: Option<Fog>,
+    /// Sky behind everything; `None` = clear to `background`.
+    pub sky: Option<Sky>,
 }
 
 impl Default for Scene {
@@ -208,43 +307,61 @@ impl Scene {
             ambient: Color::rgb(0.35, 0.38, 0.45),
             background: Color::rgb(0.08, 0.09, 0.12),
             fog: None,
+            sky: None,
         }
     }
 
     /// Adds an object. Prefer `World::spawn`, which also sets mesh bounds.
-    pub fn add(&mut self, object: Object) -> ObjectId {
+    pub fn add(&mut self, mut object: Object) -> ObjectId {
         self.count += 1;
-        if let Some(index) = self.free.pop() {
+        object.children.clear();
+        let parent = object.parent.filter(|p| self.contains(*p));
+        object.parent = parent;
+        let id = if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
             slot.object = Some(object);
             ObjectId { index, generation: slot.generation }
         } else {
             self.slots.push(Slot { generation: 0, object: Some(object) });
             ObjectId { index: self.slots.len() as u32 - 1, generation: 0 }
+        };
+        if let Some(p) = parent {
+            self[p].children.push(id);
         }
+        id
     }
 
     /// Removes an object and all its children. Returns false if it did not exist.
     pub fn destroy(&mut self, id: ObjectId) -> bool {
-        if !self.contains(id) {
-            return false;
+        let Some(parent) = self.get(id).map(|o| o.parent) else { return false };
+        if let Some(p) = parent.and_then(|p| self.get_mut(p)) {
+            p.children.retain(|c| *c != id);
         }
-        let children: Vec<ObjectId> = self.iter().filter(|(_, o)| o.parent == Some(id)).map(|(c, _)| c).collect();
-        for child in children {
-            self.destroy(child);
+        // Iterative: deep hierarchies cannot overflow the stack. O(size of the subtree).
+        let mut stack = vec![id];
+        while let Some(cur) = stack.pop() {
+            let slot = &mut self.slots[cur.index as usize];
+            if slot.generation != cur.generation {
+                continue;
+            }
+            let Some(o) = slot.object.take() else { continue };
+            stack.extend(o.children);
+            slot.generation = slot.generation.wrapping_add(1);
+            self.free.push(cur.index);
+            self.count -= 1;
         }
-        let slot = &mut self.slots[id.index as usize];
-        slot.object = None;
-        slot.generation = slot.generation.wrapping_add(1);
-        self.free.push(id.index);
-        self.count -= 1;
         true
     }
 
-    /// Removes all objects (camera and lighting stay).
+    /// Removes all objects (camera and lighting stay). Every old [`ObjectId`] becomes invalid.
     pub fn clear_objects(&mut self) {
-        self.slots.clear();
         self.free.clear();
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            slot.object = None;
+            slot.generation = slot.generation.wrapping_add(1);
+            self.free.push(i as u32);
+        }
+        self.free.reverse();
         self.count = 0;
     }
 
@@ -280,7 +397,66 @@ impl Scene {
     }
 
     pub fn children(&self, id: ObjectId) -> Vec<ObjectId> {
-        self.iter().filter(|(_, o)| o.parent == Some(id)).map(|(c, _)| c).collect()
+        self.get(id).map(|o| o.children.clone()).unwrap_or_default()
+    }
+
+    /// Called before every fixed step: remembers the pose of every moving body.
+    pub fn begin_interp_step(&mut self) {
+        for slot in &mut self.slots {
+            let Some(o) = slot.object.as_mut() else { continue };
+            let moving = o.body.as_ref().is_some_and(|b| b.kind != crate::physics::BodyKind::Static);
+            o.interp = moving.then_some(Interp {
+                prev_position: o.position,
+                prev_rotation: o.rotation,
+                position: o.position,
+                rotation: o.rotation,
+            });
+        }
+    }
+
+    /// Called after every fixed step (physics included): stores the new pose of moving bodies.
+    pub fn end_interp_step(&mut self) {
+        for slot in &mut self.slots {
+            let Some(o) = slot.object.as_mut() else { continue };
+            if let Some(i) = &mut o.interp {
+                i.position = o.position;
+                i.rotation = o.rotation;
+            }
+        }
+    }
+
+    /// Number of slots (live + free). Object indices are `0..capacity()`.
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// World matrix and effective visibility of every object, indexed by `ObjectId::index`, in
+    /// one O(n) pass (parents first). Simulated bodies are interpolated by `alpha` (see
+    /// [`Object::render_local_matrix`]). The renderer calls this once per frame.
+    pub fn compute_world_transforms(&self, alpha: f32, matrices: &mut Vec<Mat4>, visible: &mut Vec<bool>) {
+        let n = self.slots.len();
+        matrices.clear();
+        matrices.resize(n, Mat4::IDENTITY);
+        visible.clear();
+        visible.resize(n, false);
+        let mut stack: Vec<(u32, Mat4, bool)> = Vec::with_capacity(64);
+        for (i, slot) in self.slots.iter().enumerate() {
+            let Some(o) = &slot.object else { continue };
+            if o.parent.is_some() {
+                continue;
+            }
+            stack.push((i as u32, Mat4::IDENTITY, true));
+            while let Some((idx, parent_m, parent_vis)) = stack.pop() {
+                let Some(o) = self.slots[idx as usize].object.as_ref() else { continue };
+                let m = parent_m * o.render_local_matrix(alpha);
+                let vis = parent_vis && o.visible;
+                matrices[idx as usize] = m;
+                visible[idx as usize] = vis;
+                for c in &o.children {
+                    stack.push((c.index, m, vis));
+                }
+            }
+        }
     }
 
     /// Attaches `child` to `parent` (keeps the child's local transform), or detaches with `None`.
@@ -300,6 +476,16 @@ impl Scene {
                 cur = self.get(c).and_then(|o| o.parent);
             }
         }
+        let old = self[child].parent;
+        if old == parent {
+            return Ok(());
+        }
+        if let Some(o) = old.and_then(|o| self.get_mut(o)) {
+            o.children.retain(|c| *c != child);
+        }
+        if let Some(p) = parent {
+            self[p].children.push(child);
+        }
         self[child].parent = parent;
         Ok(())
     }
@@ -314,8 +500,8 @@ impl Scene {
             m = o.local_matrix() * m;
             cur = o.parent;
             depth += 1;
-            if depth > 64 {
-                break;
+            if depth > self.slots.len() {
+                break; // cycle guard (set_parent prevents cycles)
             }
         }
         m
@@ -369,6 +555,60 @@ impl Scene {
         let bottom = if own.is_empty() { self.world_position(id).y } else { own.min.y };
         self.translate_world(id, Vec3::new(0.0, top.max.y - bottom, 0.0));
         Ok(())
+    }
+
+    /// Machine readable dump (JSON) of the camera and every object: for tests, CI and AI tools.
+    pub fn dump_json(&self) -> String {
+        fn esc(s: &str) -> String {
+            let mut o = String::with_capacity(s.len() + 2);
+            for ch in s.chars() {
+                match ch {
+                    '"' => o.push_str("\\\""),
+                    '\\' => o.push_str("\\\\"),
+                    c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => o.push(c),
+                }
+            }
+            o
+        }
+        fn v(x: Vec3) -> String {
+            let f = |n: f32| if n.is_finite() { format!("{n:.4}") } else { "null".into() };
+            format!("[{},{},{}]", f(x.x), f(x.y), f(x.z))
+        }
+        let c = &self.camera;
+        let mut out = format!(
+            "{{\"camera\":{{\"position\":{},\"forward\":{},\"fov\":{:.2},\"ortho\":{}}},\"objects\":[",
+            v(c.position),
+            v(c.forward()),
+            c.fov,
+            c.ortho.map_or("null".into(), |o| format!("{o:.3}"))
+        );
+        let (mut mats, mut vis) = (Vec::new(), Vec::new());
+        self.compute_world_transforms(1.0, &mut mats, &mut vis);
+        for (n, (id, o)) in self.iter().enumerate() {
+            let i = id.index() as usize;
+            let b = o.local_bounds.transform(&mats[i]);
+            let e = o.euler();
+            let _ = write!(
+                out,
+                "{}{{\"id\":{},\"name\":\"{}\",\"parent\":{},\"mesh\":{},\"position\":{},\"world_position\":{},\"rotation_deg\":{},\"scale\":{},\"visible\":{},\"bounds\":{},\"body\":{},\"light\":{}}}",
+                if n > 0 { "," } else { "" },
+                id.index(),
+                esc(&o.name),
+                o.parent.map_or("null".into(), |p| p.index().to_string()),
+                o.mesh.map_or("null".into(), |m| m.0.to_string()),
+                v(o.position),
+                v(mats[i].w_axis.truncate()),
+                v(Vec3::new(e.x.to_degrees(), e.y.to_degrees(), e.z.to_degrees())),
+                v(o.scale),
+                vis[i],
+                if b.is_empty() { "null".into() } else { format!("[{},{}]", v(b.min), v(b.max)) },
+                o.body.as_ref().map_or("null".into(), |b| format!("{{\"kind\":\"{}\",\"velocity\":{}}}", b.kind.name(), v(b.velocity))),
+                o.light.is_some()
+            );
+        }
+        out.push_str("]}");
+        out
     }
 
     /// Human/AI readable dump of the whole scene.
@@ -435,5 +675,132 @@ impl std::ops::Index<ObjectId> for Scene {
 impl std::ops::IndexMut<ObjectId> for Scene {
     fn index_mut(&mut self, id: ObjectId) -> &mut Object {
         self.get_mut(id).unwrap_or_else(|| panic!("object #{} does not exist (destroyed?)", id.index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lod_picks_the_farthest_reached_level() {
+        let mut o = Object::empty();
+        o.mesh = Some(MeshId(0));
+        o.lod = vec![(40.0, MeshId(2)), (10.0, MeshId(1))]; // any order
+        assert_eq!(o.mesh_at(0.0), Some(MeshId(0)));
+        assert_eq!(o.mesh_at(9.9), Some(MeshId(0)));
+        assert_eq!(o.mesh_at(10.0), Some(MeshId(1)));
+        assert_eq!(o.mesh_at(39.0), Some(MeshId(1)));
+        assert_eq!(o.mesh_at(1000.0), Some(MeshId(2)));
+        assert_eq!(Object::empty().mesh_at(5.0), None);
+    }
+    use crate::physics::{Body, BodyKind};
+
+    #[test]
+    fn clear_objects_invalidates_ids() {
+        let mut s = Scene::new();
+        let a = s.add(Object::empty());
+        s.clear_objects();
+        assert!(!s.contains(a));
+        let b = s.add(Object::empty());
+        assert_eq!(b.index(), a.index());
+        assert!(!s.contains(a) && s.contains(b));
+    }
+
+    #[test]
+    fn hierarchy_index_and_destroy() {
+        let mut s = Scene::new();
+        let root = s.add(Object::empty());
+        let mut last = root;
+        for _ in 0..10_000 {
+            let mut o = Object::empty();
+            o.position = Vec3::X;
+            o.parent = Some(last);
+            last = s.add(o);
+        }
+        assert_eq!(s.children(root).len(), 1);
+        let (mut m, mut v) = (Vec::new(), Vec::new());
+        s.compute_world_transforms(1.0, &mut m, &mut v);
+        assert!((m[last.index() as usize].w_axis.x - 10_000.0).abs() < 1e-2);
+        assert!((s.world_position(last).x - m[last.index() as usize].w_axis.x).abs() < 1e-2);
+        let other = s.add(Object::empty());
+        s.set_parent(last, Some(other)).unwrap();
+        assert_eq!(s.children(other), vec![last]);
+        assert!(s.destroy(root)); // deep chain: no stack overflow
+        assert_eq!(s.len(), 2);
+        let json = s.dump_json();
+        assert!(json.starts_with("{\"camera\"") && json.ends_with("]}"));
+        assert!(s.destroy(other));
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn interpolation_and_teleport() {
+        let mut s = Scene::new();
+        let mut o = Object::empty();
+        o.body = Some(Body::dynamic());
+        let id = s.add(o);
+        s.begin_interp_step();
+        s[id].position = Vec3::new(1.0, 0.0, 0.0); // what physics would do
+        s.end_interp_step();
+        let half = s[id].render_local_matrix(0.5).w_axis.x;
+        assert!((half - 0.5).abs() < 1e-5);
+        s[id].position = Vec3::new(10.0, 0.0, 0.0); // teleport by game code: no smear
+        assert_eq!(s[id].render_local_matrix(0.5).w_axis.x, 10.0);
+    }
+
+    #[test]
+    fn destroyed_object_returns_none() {
+        let mut s = Scene::new();
+        let a = s.add(Object::empty());
+        assert!(s.get(a).is_some());
+        assert!(s.destroy(a));
+        assert!(s.get(a).is_none());
+        assert!(s.get_mut(a).is_none());
+    }
+
+    #[test]
+    fn set_parent_cycle_detected() {
+        let mut s = Scene::new();
+        let a = s.add(Object::empty());
+        let b = s.add(Object::empty());
+        s.set_parent(b, Some(a)).unwrap();
+        // a is parent of b, so making a a child of b would create a cycle
+        let err = s.set_parent(a, Some(b));
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("cycle"));
+    }
+
+    #[test]
+    fn interpolation_teleport_detection() {
+        let mut s = Scene::new();
+        let mut obj = Object::empty();
+        obj.body = Some(Body { kind: BodyKind::Dynamic, ..Default::default() });
+        let id = s.add(obj);
+        s.begin_interp_step();
+        s.end_interp_step();
+        // Teleport: change position after end_interp_step
+        s[id].position = Vec3::new(100.0, 0.0, 0.0);
+        // render_local_matrix should NOT interpolate (teleport detected)
+        let m = s[id].render_local_matrix(0.5);
+        let p = m.w_axis.truncate();
+        assert_eq!(p, Vec3::new(100.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn interpolation_normal_motion() {
+        let mut s = Scene::new();
+        let mut obj = Object::empty();
+        obj.body = Some(Body { kind: BodyKind::Dynamic, ..Default::default() });
+        obj.position = Vec3::new(0.0, 0.0, 0.0);
+        let id = s.add(obj);
+        s.begin_interp_step();
+        // Simulate physics moving the object
+        s[id].position = Vec3::new(10.0, 0.0, 0.0);
+        s.end_interp_step();
+        // At alpha=0.5, should be at (5, 0, 0)
+        let m = s.get(id).unwrap().render_local_matrix(0.5);
+        let p = m.w_axis.truncate();
+        assert!((p.x - 5.0).abs() < 1e-3, "expected 5.0, got {}", p.x);
     }
 }

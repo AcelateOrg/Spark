@@ -19,6 +19,7 @@
 //! Conventions: Y-up, right-handed, meters, radians, sRGB colors.
 
 mod app;
+mod devtools;
 
 pub use app::{App, HELP, RunArgs};
 pub use spark_core::*;
